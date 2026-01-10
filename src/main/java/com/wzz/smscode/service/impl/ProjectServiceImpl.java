@@ -3,6 +3,7 @@ package com.wzz.smscode.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.wzz.smscode.cacheManager.NumberRecordCacheManager;
 import com.wzz.smscode.dto.project.ProjectPriceDetailsDTO;
 import com.wzz.smscode.dto.project.ProjectPriceSummaryDTO;
 import com.wzz.smscode.entity.*;
@@ -43,22 +44,22 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
     @Lazy
     private PriceTemplateItemService priceTemplateItemService;
 
+    @Autowired
+    private NumberRecordCacheManager cacheManager; // 注入缓存管理器
+
     @Transactional(rollbackFor = Exception.class)
     @Override
     public boolean updateProject(Project projectDTO) {
-        // 1. 参数校验
         if (projectDTO.getId() == null) {
             throw new BusinessException("更新项目失败：必须提供项目的主键ID。");
         }
-
-        // 2. 查询项目更新前的状态
         Project existingProject = this.getById(projectDTO.getId());
         if (existingProject == null) {
             log.warn("尝试更新一个不存在的项目，ID: {}", projectDTO.getId());
             return false;
         }
-
-        // 3. 更新 Project 表自身
+        String oldProjectId = existingProject.getProjectId();
+        Integer oldLineId = Integer.valueOf(existingProject.getLineId());
         Project projectToUpdate = new Project();
         BeanUtils.copyProperties(projectDTO, projectToUpdate);
         boolean projectUpdated = this.updateById(projectToUpdate);
@@ -66,27 +67,37 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
             log.error("更新项目基础信息失败, Project ID: {}", projectDTO.getId());
             throw new BusinessException("更新项目基础信息失败，操作已回滚。");
         }
-        log.info("项目基础信息已更新, ID: {}", projectDTO.getId());
+        cacheManager.evictProject(oldProjectId, oldLineId);
+        cacheManager.evictProject(projectDTO.getProjectId(), Integer.valueOf(projectDTO.getLineId()));
+        log.info("项目基础信息已更新并清理缓存, ID: {}", projectDTO.getId());
         log.info("开始同步更新关联的价格模板项配置...");
         LambdaUpdateWrapper<PriceTemplateItem> updateWrapper = new LambdaUpdateWrapper<>();
-        updateWrapper.eq(PriceTemplateItem::getProjectTableId, existingProject.getId()); // 根据项目主表ID匹配
+        updateWrapper.eq(PriceTemplateItem::getProjectTableId, existingProject.getId());
         try {
-            updateWrapper.set(PriceTemplateItem::getProjectId, Long.valueOf(projectDTO.getProjectId()));
-            updateWrapper.set(PriceTemplateItem::getLineId, Long.valueOf(projectDTO.getLineId()));
+            if (projectDTO.getProjectId() != null) {
+                updateWrapper.set(PriceTemplateItem::getProjectId, Long.valueOf(projectDTO.getProjectId()));
+            }
+            if (projectDTO.getLineId() != null) {
+                updateWrapper.set(PriceTemplateItem::getLineId, Long.valueOf(projectDTO.getLineId()));
+            }
         } catch (NumberFormatException e) {
             log.error("项目ID或线路ID格式转换错误，无法同步模板", e);
         }
+
         updateWrapper.set(PriceTemplateItem::getProjectName, projectDTO.getProjectName());
         updateWrapper.set(PriceTemplateItem::getCostPrice, projectDTO.getCostPrice());
         updateWrapper.set(PriceTemplateItem::getMinPrice, projectDTO.getPriceMin());
         updateWrapper.set(PriceTemplateItem::getMaxPrice, projectDTO.getPriceMax());
+
         boolean itemsUpdated = priceTemplateItemService.update(updateWrapper);
         log.info("关联的价格模板项同步完成: {}, Project ID: {}", itemsUpdated, projectDTO.getId());
+
         return true;
     }
 
     @Override
     public Project getProject(String projectId, Integer lineId) {
+
         LambdaQueryWrapper<Project> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(Project::getProjectId, projectId)
                 .eq(Project::getLineId, lineId);

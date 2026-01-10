@@ -177,7 +177,7 @@ public class UserController {
     public CommonResultDTO<UserDTO> getUserInfo(
             @RequestParam String userName,
             @RequestParam String password) {
-        User user = userService.authenticateUserByUserName(userName, password);
+        User user = userService.authenticateUserByUserName(userName, password,false);
         if (user == null) {
             return CommonResultDTO.error(Constants.ERROR_AUTH_FAILED, "用户ID或密码错误");
         }

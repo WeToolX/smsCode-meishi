@@ -31,6 +31,8 @@ public interface UserService extends IService<User> {
 
     User authenticateUserByUserName(String userId, String password);
 
+    User authenticateUserByUserName(String userName, String password, boolean useCache);
+
     @Transactional(rollbackFor = Exception.class)
     void deleteSubUsersBatch(List<Long> userIds, Long agentId);
 

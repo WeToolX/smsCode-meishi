@@ -121,7 +121,7 @@
         <dependency>
             <groupId>cn.hutool</groupId>
             <artifactId>hutool-all</artifactId>
-            <version>5.8.36</version>
+            <version>5.8.40</version>
         </dependency>
 
         <dependency>
@@ -157,19 +157,20 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-websocket</artifactId>
+
         </dependency>
 <!--                 Sa-Token 整合 RedisTemplate -->
-<!--                <dependency>-->
-<!--                    <groupId>cn.dev33</groupId>-->
-<!--                    <artifactId>sa-token-redis-template</artifactId>-->
-<!--                    <version>1.44.0</version>-->
-<!--                </dependency>-->
+                <dependency>
+                    <groupId>cn.dev33</groupId>
+                    <artifactId>sa-token-redis-template</artifactId>
+                    <version>1.44.0</version>
+                </dependency>
 
 <!--                &lt;!&ndash; 提供 Redis 连接池 &ndash;&gt;-->
-<!--                <dependency>-->
-<!--                    <groupId>org.apache.commons</groupId>-->
-<!--                    <artifactId>commons-pool2</artifactId>-->
-<!--                </dependency>-->
+                <dependency>
+                    <groupId>org.apache.commons</groupId>
+                    <artifactId>commons-pool2</artifactId>
+                </dependency>
 
 <!--        加解密工具-->
         <dependency>
@@ -191,7 +192,7 @@
         <dependency>
             <groupId>com.squareup.okhttp3</groupId>
             <artifactId>okhttp</artifactId>
-            <version>4.11.0</version>
+            <version>4.12.0</version>
         </dependency>
 
         <dependency>
@@ -200,14 +201,19 @@
         </dependency>
 
         <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <dependency>
             <groupId>commons-codec</groupId>
             <artifactId>commons-codec</artifactId>
-            <version>1.17.1</version>   <!-- 写代码时最新版，可按需调整 -->
+            <version>1.17.1</version>
         </dependency>
         <dependency>
             <groupId>com.lmax</groupId>
             <artifactId>disruptor</artifactId>
-            <version>3.4.4</version> <!-- 请根据你的 Spring Boot/Log4j2 版本选择兼容版本 -->
+            <version>3.4.4</version>
         </dependency>
     </dependencies>
 

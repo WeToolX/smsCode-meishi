@@ -270,7 +270,6 @@ public class AdminController {
         }catch (BusinessException e){
             return Result.error(e.getMessage());
         }
-
     }
 
     /**

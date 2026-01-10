@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.wzz.smscode.cacheManager.NumberRecordCacheManager;
 import com.wzz.smscode.common.CommonResultDTO;
 import com.wzz.smscode.common.Constants;
 import com.wzz.smscode.dto.*;
@@ -379,6 +380,8 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
         self.updateRecordAfterRetrieval(record, isSuccess, result);
     }
 
+    @Autowired
+    private NumberRecordCacheManager cacheManager;
     /**
      * 手动获取验证码接口
      * 修改说明：
@@ -388,16 +391,23 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
      */
     @Override
     public CommonResultDTO<String> getCode(String userName, String password, String identifier, String projectId, String lineId) {
-        //份校验
         User user = userService.authenticateUserByUserName(userName, password);
         if (user == null) return CommonResultDTO.error(Constants.ERROR_AUTH_FAILED, "用户验证失败");
-        //查询最新记录
-        NumberRecord record = this.getOne(new LambdaQueryWrapper<NumberRecord>()
-                .eq(NumberRecord::getPhoneNumber, identifier)
-                .eq(NumberRecord::getUserId, user.getId())
-                .eq(NumberRecord::getProjectId, projectId)
-                .orderByDesc(NumberRecord::getGetNumberTime)
-                .last("LIMIT 1"));
+
+        // 2. 获取记录 (优先缓存)
+        NumberRecord record = cacheManager.getRecord(identifier, projectId);
+        if (record == null) {
+            record = this.getOne(new LambdaQueryWrapper<NumberRecord>()
+                    .eq(NumberRecord::getPhoneNumber, identifier)
+                    .eq(NumberRecord::getUserId, user.getId())
+                    .eq(NumberRecord::getProjectId, projectId)
+                    .orderByDesc(NumberRecord::getGetNumberTime)
+                    .last("LIMIT 1"));
+            if (record != null) {
+                cacheManager.cacheRecord(record);
+            }
+        }
+
         if (record == null) return CommonResultDTO.error(Constants.ERROR_NO_CODE, "无记录");
         //如果已经是成功状态，直接返回库里的码
         if (record.getStatus() == 2 && StringUtils.hasText(record.getCode())) {
@@ -410,7 +420,13 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
         if (record.getStatus() ==1) {
             return CommonResultDTO.error(Constants.ERROR_NO_CODE,"后台正在取码中，请稍后...");
         }
-        Project project = projectService.getProject(record.getProjectId(), record.getLineId());
+        Project project = cacheManager.getProject(projectId, Integer.valueOf(lineId));
+        if (project == null) {
+            project = projectService.getProject(record.getProjectId(), record.getLineId());
+            if (project != null) {
+                cacheManager.cacheProject(projectId, Integer.valueOf(lineId), project);
+            }
+        }
 
         // ================== 特殊API ==================
         if (Boolean.TRUE.equals(project.getSpecialApiStatus())) {
@@ -473,7 +489,6 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
 
     /**
      * 核心逻辑：更新记录状态，并处理 代理返利 或 用户退款
-     * 增加逻辑：处理完成后，异步或在事务提交后触发第三方接口释放手机号
      */
     @Transactional(rollbackFor = Exception.class)
     @Override
@@ -511,7 +526,11 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
             latestRecord.setStatus(2);
             latestRecord.setCode(result);
             latestRecord.setErrorInfo(null);
-            this.updateById(latestRecord);
+
+            this.updateById(latestRecord); // 更新数据库
+            cacheManager.cacheRecord(latestRecord);
+            cacheManager.evictUser(latestRecord.getUserName());
+
             userService.updateUserStats(latestRecord.getUserId());
             try {
                 userService.processRebates(latestRecord);
@@ -539,21 +558,26 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
 
                 BigDecimal balanceAfterRefund = ledgerService.createLedgerAndUpdateBalance(refundDto);
                 latestRecord.setBalanceAfter(balanceAfterRefund);
-                this.updateById(latestRecord);
+
+                this.updateById(latestRecord); // 更新数据库
+                cacheManager.cacheRecord(latestRecord);
+                cacheManager.evictUser(latestRecord.getUserName());
                 userService.updateUserStats(latestRecord.getUserId());
             }
         }
 
-        // --- 3. 释放手机号逻辑 (关键新增) ---
+        // --- 3. 释放手机号逻辑 ---
         final String pId = latestRecord.getProjectId();
         final Integer lId = latestRecord.getLineId();
         final String phone = latestRecord.getPhoneNumber();
         final String apiId = latestRecord.getApiPhoneId();
         final boolean isFinalSuccess = (latestRecord.getStatus() == 2);
+
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
                 try {
+                    // 这里不需要改缓存，因为是外部 API 调用
                     Project project = projectService.getProject(pId, lId);
                     if (project != null) {
                         Map<String, String> releaseContext = new HashMap<>();

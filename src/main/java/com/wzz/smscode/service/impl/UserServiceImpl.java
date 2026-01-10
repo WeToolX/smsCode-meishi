@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.wzz.smscode.cacheManager.NumberRecordCacheManager;
 import com.wzz.smscode.common.CommonResultDTO;
 import com.wzz.smscode.common.Constants;
 import com.wzz.smscode.dto.BatchChargeRequestDTO;
@@ -32,6 +33,8 @@ import com.wzz.smscode.service.*;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.ibatis.exceptions.TooManyResultsException;
+import org.mybatis.spring.MyBatisSystemException;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 //import org.springframework.security.crypto.password.PasswordEncoder;
@@ -61,6 +64,9 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     @Autowired private UserProjectLineService userProjectLineService;
     @Autowired @Lazy private PriceTemplateService priceTemplateService;
     @Autowired private UserLedgerService userLedgerService;
+
+    @Autowired
+    private NumberRecordCacheManager cacheManager; // 注入缓存管理器
 
 
 
@@ -194,6 +200,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
             priceTemplateService.addUserToTemplate(newTemplateId, user.getId());
         }
 
+        cacheManager.evictUser(user.getUserName());
         return updateById(user);
     }
 
@@ -205,69 +212,112 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
             throw new BusinessException(0,"用户查询失败");
         }
         user.setPassword(id.getUserPassword());
+        cacheManager.evictUser(user.getUserName());
         return updateById(user);
     }
 
+
+
+    /**
+     * 用户更新密码
+     */
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Boolean updatePassWardByUserName(UserUpdatePasswardDTO updateUserDto) {
+        // 1. 获取并锁定用户记录
         User user = findAndLockByUserName(updateUserDto.getUserName());
         if (user == null){
             throw new BusinessException(0,"没有该用户！");
         }
+
+        // 2. 校验旧密码
         if (!user.getPassword().equals(updateUserDto.getOldPassword())){
             throw new BusinessException(0,"用户名旧密码不正确");
         }
+
+        // 3. 设置新密码并更新数据库
         user.setPassword(updateUserDto.getNewPassword());
-        return updateById(user);
+        boolean success = updateById(user);
+
+        // 4. 【关键】如果更新成功，立即清除该用户的 Redis 缓存
+        if (success) {
+            // 清除缓存后，下次 authenticateUserByUserName 就会被迫查库，从而校验新密码
+            cacheManager.evictUser(user.getUserName());
+            log.info("用户 {} 修改密码成功，已同步清除 Redis 缓存", user.getUserName());
+        }
+
+        return success;
     }
 
-
     /**
-     * 用户认证并更新登录时间
-     *
-     * @param userName 用户名 (原 userId，建议改为 userName 更清晰)
-     * @param password 密码
-     * @return User 登录成功返回用户对象，失败返回 null
+     * 默认走缓存的登录验证（兼容原有逻辑）
      */
     @Override
-    @Transactional(rollbackFor = Exception.class) // 涉及更新操作，建议加上事务
     public User authenticateUserByUserName(String userName, String password) {
-        // 1. 构造查询条件
+        // 默认传入 true
+        return this.authenticateUserByUserName(userName, password, true);
+    }
+
+    /**
+     * 带缓存控制的登录验证
+     * @param useCache 是否走缓存：true-先查缓存，false-直接查数据库
+     */
+    @Override
+    public User authenticateUserByUserName(String userName, String password, boolean useCache) {
+        User user = null;
+        if (useCache) {
+            user = cacheManager.getUser(userName);
+            log.info("从缓存获取{}信息：{}", userName, user);
+            if (user != null) {
+                // 校验密码
+                if (!password.equals(user.getPassword())) {
+                    return null;
+                }
+                // 校验状态
+                if (user.getStatus() != 0) {
+                    log.info("用户 {} 状态异常: {}", userName, user.getStatus());
+                    return null;
+                }
+                // 缓存命中并校验通过，直接更新登录时间并返回
+                updateLastLoginTime(user.getId(), userName);
+                return user;
+            }
+        }
+
+        // 2. 缓存未命中或强制不走缓存，查询数据库
         LambdaQueryWrapper<User> queryWrapper = new LambdaQueryWrapper<>();
         queryWrapper.eq(User::getUserName, userName);
-
-        // 2. 查询用户
-        // 优化点：使用 getOne(wrapper, true)，第二个参数 true 表示如果存在多个结果则抛出异常
-        User user;
         try {
             user = this.getOne(queryWrapper, true);
-        } catch (Exception e) {
-            // 捕获 MyBatis-Plus 的 TooManyResultsException 等异常
-            log.warn("警告：数据库中存在多个用户名为 '{}' 的用户，请检查数据！", userName);
-            throw new BusinessException(0, "系统中存在多个相同用户！");
-        }
-        if (user == null) {
-            return null;
-        }
-        if (!password.equals(user.getPassword())) {
-            return null; // 密码错误
-        }
-        // 5. 校验状态 (假设 0 是正常状态)
-        if (user.getStatus() != 0) {
-            log.info("用户 {} 尝试登录，但状态异常: {}", userName, user.getStatus());
-            return null; // 账号被禁用或状态异常
+        } catch (TooManyResultsException | MyBatisSystemException e) {
+            log.error("数据库数据异常：用户名 '{}' 存在重复记录", userName, e);
+            throw new BusinessException(0, "账号状态异常，请联系管理员");
         }
 
-        boolean updateResult =  this.update(new LambdaUpdateWrapper<User>()
-                .eq(User::getId, user.getId())
-                .set(User::getLastLoginTime, LocalDateTime.now())
-        );
-        if (!updateResult) {
-            log.error("用户 {} 登录时间更新失败", userName);
+        // 3. 数据库校验
+        if (user == null || !password.equals(user.getPassword())) {
+            return null;
         }
-        // 7. 返回用户信息
+        if (user.getStatus() != 0) {
+            return null;
+        }
+        updateLastLoginTime(user.getId(), userName);
+        cacheManager.cacheUser(user);
         return user;
+    }
+
+    /**
+     * 提取更新登录时间的私有方法，减少冗余
+     */
+    private void updateLastLoginTime(Long userId, String userName) {
+        try {
+            this.update(new LambdaUpdateWrapper<User>()
+                    .eq(User::getId, userId)
+                    .set(User::getLastLoginTime, LocalDateTime.now())
+            );
+        } catch (Exception e) {
+            log.error("更新用户 {} 登录时间失败", userName, e);
+        }
     }
 
 
@@ -316,7 +366,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
 
     @Override
     public CommonResultDTO<BigDecimal> getBalance(String userName, String password) {
-        User user = authenticateUserByUserName(userName, password);
+        User user = authenticateUserByUserName(userName, password,false);
         if (user == null) {
             return CommonResultDTO.error(Constants.ERROR_AUTH_FAILED, "用户ID或密码错误");
         }
