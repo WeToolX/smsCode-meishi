@@ -18,10 +18,10 @@ public class RestTemplateConfig {
     public RestTemplate restTemplate() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         // 连接超时（毫秒）：与第三方握手的时间。
-        // 如果对方挂了或者网络不通，3秒内就会抛出异常，不会傻等。
-        factory.setConnectTimeout(10000);
+        // 如果对方挂了或者网络不通，5秒内就会抛出异常，不会傻等。
+        factory.setConnectTimeout(5000);
         // 读取超时（毫秒）：对方接口处理逻辑的时间。
-        // 这里设置为 5000ms (5秒)。
+        // 这里设置为 15000ms (15秒)。
         factory.setReadTimeout(15000);
         RestTemplate restTemplate = new RestTemplate(factory);
         restTemplate.getMessageConverters().stream()

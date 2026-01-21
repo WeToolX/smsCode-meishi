@@ -205,6 +205,6 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(MyBatisSystemException.class)
     public Result<?> handleMyBatisSystemException(MyBatisSystemException e){
         log.warn("数据库框架处理异常: {}，异常详情：{}", e.getMessage(), e);
-        return Result.error("数据库框架处理异常");
+        return Result.error("系统异常：异常码-10045");
     }
 }

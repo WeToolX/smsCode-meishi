@@ -502,9 +502,9 @@ public class SmsApiService {
             }
         } catch (Exception e) {
             log.error("特殊API取号异常", e);
-            throw new BusinessException("特殊API取号失败: " + e.getMessage());
+            throw new BusinessException("取号失败: " + e.getMessage());
         }
-        throw new BusinessException("特殊API返回空");
+        throw new BusinessException("返回空");
     }
 
     /**
@@ -700,7 +700,7 @@ public class SmsApiService {
             return context;
         }
 
-        throw new BusinessException("AES特殊接口获取手机号失败");
+        throw new BusinessException("获取手机号失败，请稍后再试！");
     }
 
     /**
@@ -881,7 +881,7 @@ public class SmsApiService {
                 try { Thread.sleep(3000); } catch (InterruptedException ignored) {}
             }
         }
-
-        throw new BusinessException("AES 获取验证码超时（5分钟未获取到）");
+        log.error("AES获取验证码超时");
+        throw new BusinessException("获取验证码超时（5分钟未获取到）");
     }
 }

@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.baomidou.mybatisplus.extension.repository.AbstractRepository;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.wzz.smscode.cacheManager.NumberRecordCacheManager;
 import com.wzz.smscode.common.CommonResultDTO;
@@ -185,66 +186,18 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
 
             } catch (BusinessException e) {
                 log.error("调用接口获取号码失败 (尝试 {}/{})，终止流程: {}", attempt, MAX_ATTEMPTS, e.getMessage());
-                return CommonResultDTO.error(Constants.ERROR_SYSTEM_ERROR, "" + e.getMessage());
+                return CommonResultDTO.error(Constants.ERROR_NO_CODE, "获取号码失败，请稍后再试！");
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                return CommonResultDTO.error(Constants.ERROR_SYSTEM_ERROR, "系统线程中断");
+                return CommonResultDTO.error(Constants.ERROR_NO_CODE, "系统线程中断");
             } catch (Exception e) {
                 log.error("未知异常", e);
-                return CommonResultDTO.error(Constants.ERROR_SYSTEM_ERROR, "系统未知错误");
+                return CommonResultDTO.error(Constants.ERROR_NO_CODE, "系统未知错误");
             }
         }
         if (!numberFoundAndVerified || successfulIdentifier == null) {
             return CommonResultDTO.error(Constants.ERROR_NO_CODE, "获取可用号码失败，请稍后重试");
         }
-//        String phoneNumber = successfulIdentifier.get("phone");
-
-//        // 1. 执行扣款账本 (LedgerType=0 出账, FundType=业务扣费)
-//        LedgerCreationDTO deductionDto = LedgerCreationDTO.builder()
-//                .userId(user.getId())
-//                .amount(price)
-//                .ledgerType(0) // 出账
-//                .fundType(FundType.BUSINESS_DEDUCTION)
-//                .remark("取号预扣费")
-//                .phoneNumber(phoneNumber)
-//                .lineId(lineId)
-//                .projectId(projectId)
-//                .build();
-//
-//        // 此方法会扣除余额，如果余额不足会抛出异常回滚事务
-//        BigDecimal newBalance = ledgerService.createLedgerAndUpdateBalance(deductionDto);
-//
-//        // 2. 写入号码记录
-//        NumberRecord record = new NumberRecord();
-//        record.setUserId(user.getId());
-//        record.setProjectId(projectId);
-//        record.setLineId(lineId);
-//        record.setUserName(user.getUserName());
-//        record.setPhoneNumber(phoneNumber);
-//        record.setApiPhoneId(successfulIdentifier.get("id"));
-//        record.setStatus(0); // 待取码
-//        record.setCharged(1); // 【关键】标记为已扣费
-//        record.setPrice(price);
-//        record.setCostPrice(costPrice);
-//        record.setBalanceBefore(user.getBalance()); // 扣费前余额
-//        record.setBalanceAfter(newBalance);         // 扣费后余额
-//        record.setGetNumberTime(LocalDateTime.now());
-//        record.setProjectName(projectT.getProjectName());
-//        this.save(record);
-//
-//        final Long recordId = record.getId();
-//        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-//            @Override
-//            public void afterCommit() {
-//                try {
-//                    self.retrieveCode(recordId, null);
-//                } catch (Exception e) {
-//                    log.error("取号任务启动异常，记录ID: {}", recordId, e);
-//                }
-//            }
-//        });
-//
-//        userService.updateUserStats(user.getId());
         try {
             return self.createOrderTransaction(
                     user.getId(),
@@ -256,9 +209,9 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
                     projectT.getProjectName()
             );
         } catch (BusinessException e) {
-            return CommonResultDTO.error(Constants.ERROR_INSUFFICIENT_BALANCE, e.getMessage());
+            log.info("<getNumber> (<createOrderTransaction> {}/{})<出现异常错误>: {}", projectId, lineId, e.getMessage());
+            return CommonResultDTO.error(Constants.ERROR_INSUFFICIENT_BALANCE, "创建取号任务失败，请稍后再试");
         }
-//        return CommonResultDTO.success("取号成功，请稍后查询验证码", successfulIdentifier.get("phone"));
     }
 
 
@@ -313,7 +266,7 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
                 try {
                     self.retrieveCode(recordId, null);
                 } catch (Exception e) {
-                    log.error("取号任务启动异常，记录ID: {}", recordId, e);
+                    log.error("取码任务启动异常，记录ID: {}", recordId, e);
                 }
             }
         });
@@ -479,7 +432,8 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
                     self.updateRecordAfterRetrieval(record, true, code);
                     return CommonResultDTO.success("获取成功", code);
                 } catch (BusinessException e) {
-                    return CommonResultDTO.error(Constants.ERROR_INSUFFICIENT_BALANCE, e.getMessage());
+                    log.info("<getCode>[{}] <出现异常：异常码：2800>:{}", record.getId(), e.getMessage());
+                    return CommonResultDTO.error(Constants.ERROR_NO_CODE, "尚未获取到验证码，请稍后重试，错误码：2800");
                 }
             }
         }
