@@ -366,11 +366,17 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
                 // 每次循环都会执行这个 Lambda。如果数据库中状态变成了 2(成功) 或 3(失败)，则停止轮询
                 Supplier<Boolean> stopCondition = () -> {
                     NumberRecord current = baseMapper.selectById(numberId);
-                    return current == null || current.getStatus() != 1;
+                    return current == null || current.getStatus() != 1 || Integer.valueOf(1).equals(current.getIsReleased());
                 };
                 // 传入停止条件
                 result = smsApiService.getVerificationCode(project, context, stopCondition);
-                if (StringUtils.hasText(result) && !result.contains("等待")) {
+                // 检查退出原因
+                NumberRecord finalCheck = baseMapper.selectById(numberId);
+                if (finalCheck != null && Integer.valueOf(1).equals(finalCheck.getIsReleased())) {
+                    log.info("记录[{}] 检测到号码已释放，停止取码并进入退款流程。", numberId);
+                    isSuccess = false;
+                    result = null; // 确保进入退款逻辑
+                } else if (StringUtils.hasText(result) && !result.contains("等待")) {
                     isSuccess = true;
                 }
             }
@@ -1211,7 +1217,17 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
         context.put("id", record.getApiPhoneId());
         context.put("token",project.getAuthTokenValue());
         try {
-            smsApiService.releasePhoneNumber(project, context,isSuccess);
+            boolean apiReleased = smsApiService.releasePhoneNumber(project, context, isSuccess);
+            if (apiReleased) {
+                this.lambdaUpdate()
+                        .set(NumberRecord::getIsReleased, 1)
+                        .eq(NumberRecord::getId, record.getId())
+                        .update();
+                log.info("号码 {} 释放成功，已标记数据库。", phoneNumber);
+                return CommonResultDTO.success("释放成功", phoneNumber);
+            } else {
+                return CommonResultDTO.error(Constants.ERROR_SYSTEM_ERROR, "号码:"+phoneNumber+">>释放失败");
+            }
         } catch (Exception e) {
             log.error("调用第三方释放接口异常: {}", e.getMessage());
         }

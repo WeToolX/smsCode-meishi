@@ -182,4 +182,9 @@ public class NumberRecord extends BaseEntity {
     @TableField("project_name")
     @DefaultValue("'无'")
     private String projectName;
+
+    @TableField("is_released")
+    @ColumnComment("该号码是否释放")
+    @DefaultValue("0")
+    private Integer isReleased; // 0-未释放，1-已释放
 }
