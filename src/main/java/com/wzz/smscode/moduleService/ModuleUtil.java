@@ -263,7 +263,7 @@ public class ModuleUtil {
                     } catch (Exception e) {
                         // 只有发生解析错误（JSON格式非法）等才会走这里
                         String errorMsg = extractErrorMessage(responseBody);
-                        log.info("变量提取失败 (解析异常) [Key: {}]: {}", rule.getTargetVariable(), errorMsg);
+                        log.info("变量提取失败 (解析异常) [Key: {}]: {},{}", rule.getTargetVariable(), errorMsg,e.getMessage());
                         throw new BusinessException(errorMsg);
                     }
                 }
