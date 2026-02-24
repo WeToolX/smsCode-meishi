@@ -40,7 +40,7 @@ public class NumberDTO {
     /**
      * 线路id
      */
-    private Integer lineId;
+    private String lineId;
     /**
      * 用户名
      */

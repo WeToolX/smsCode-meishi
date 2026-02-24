@@ -9,7 +9,6 @@ import com.wzz.smscode.entity.NumberRecord;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.math.BigDecimal;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
@@ -21,11 +20,10 @@ public interface NumberRecordService extends IService<NumberRecord> {
     void recoverInterruptedTask(NumberRecord record);
 
 //    @Transactional
-    CommonResultDTO<String> getNumber(String userName, String password, String projectId, Integer lineId);
+    CommonResultDTO<String> getNumber(String userName, String password, String projectId, String lineId);
 
     @Transactional(rollbackFor = Exception.class)
-    CommonResultDTO<String> createOrderTransaction(Long userId, String projectId, Integer lineId,
-                                                   BigDecimal price, BigDecimal costPrice,
+    CommonResultDTO<String> createOrderTransaction(Long userId, String projectId, String lineId,
                                                    Map<String, String> successfulIdentifier, String projectName);
 
     @Async("taskExecutor")

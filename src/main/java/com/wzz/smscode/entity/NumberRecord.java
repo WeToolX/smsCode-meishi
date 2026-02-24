@@ -66,7 +66,7 @@ public class NumberRecord extends BaseEntity {
      */
     @ColumnComment("项目线路ID")
     @TableField("line_id")
-    private Integer lineId;
+    private String lineId;
 
     /**
      * 分配给用户的手机号码

@@ -10,7 +10,6 @@ import com.wzz.smscode.common.Constants;
 import com.wzz.smscode.common.Result;
 import com.wzz.smscode.dto.*;
 import com.wzz.smscode.dto.CreatDTO.UserCreateDTO;
-import com.wzz.smscode.dto.EntityDTO.LedgerDTO;
 import com.wzz.smscode.dto.LoginDTO.AgentLoginDTO;
 import com.wzz.smscode.dto.agent.AgentDashboardStatsDTO;
 import com.wzz.smscode.dto.agent.AgentProjectLineUpdateDTO;
@@ -28,7 +27,6 @@ import org.springframework.context.annotation.Lazy;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.*;
 
-import java.math.BigDecimal;
 import java.util.*;
 
 /**
@@ -44,9 +42,6 @@ public class AgentController {
     private static final Logger log = LogManager.getLogger(AgentController.class);
     @Autowired
     private UserService userService;
-
-    @Autowired
-    private UserLedgerService userLedgerService;
 
     @Autowired
     @Lazy
@@ -180,14 +175,16 @@ public class AgentController {
     @PostMapping("/rechargeUser")
     public Result<?> rechargeUser(
             @RequestParam Long targetUserId,
-            @RequestParam BigDecimal amount) {
+            @RequestParam String projectId,
+            @RequestParam String lineId,
+            @RequestParam Long count) {
 
         long agentId = StpUtil.getLoginIdAsLong();
         checkAgentPermission(agentId);
         log.info("为下级用户充值{}::{}", agentId, targetUserId);
         try {
             // 业务逻辑委托给 Service 层，Service 层会进行权限和余额等校验
-            userService.rechargeUserFromAgentBalance(targetUserId, amount, agentId);
+            userService.rechargeUserFromAgentBalance(targetUserId, projectId, lineId, count, agentId);
             return Result.success("充值成功");
         }catch (BusinessException e){
             return Result.success("充值失败",e.getMessage());
@@ -201,11 +198,13 @@ public class AgentController {
     @PostMapping("/deductUser")
     public Result<?> deductUser(
             @RequestParam Long targetUserId,
-            @RequestParam BigDecimal amount) {
+            @RequestParam String projectId,
+            @RequestParam String lineId,
+            @RequestParam Long count) {
         long agentId = StpUtil.getLoginIdAsLong();
         checkAgentPermission(agentId);
         try {
-            userService.deductUserToAgentBalance(targetUserId, amount, agentId);
+            userService.deductUserToAgentBalance(targetUserId, projectId, lineId, count, agentId);
             return Result.success("扣款成功");
         }
         catch (BusinessException e){
@@ -218,50 +217,13 @@ public class AgentController {
      */
     @SaCheckLogin
     @GetMapping("/viewUserLedger") // 推荐使用更具体的 GetMapping
-    public Result<IPage<LedgerDTO>> viewUserLedger(
+    public Result<?> viewUserLedger(
             @RequestParam Long targetUserId,
             @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss") Date startTime,
             @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss") Date endTime,
             @RequestParam(defaultValue = "1") long page,
             @RequestParam(defaultValue = "10") long size) {
-
-        long agentId = StpUtil.getLoginIdAsLong();
-        checkAgentPermission(agentId);
-
-        // 验证 targetUserId 是否是该代理的下级
-        User targetUser = userService.getById(targetUserId);
-        if (targetUser == null || !Objects.equals(targetUser.getParentId(), agentId)) {
-            return Result.error(403, "无权查看该用户的账本");
-        }
-
-        Page<UserLedger> pageRequest = new Page<>(page, size);
-        LambdaQueryWrapper<UserLedger> wrapper = new LambdaQueryWrapper<>();
-        wrapper.eq(UserLedger::getUserId, targetUserId);
-        if (startTime != null) {
-            wrapper.ge(UserLedger::getTimestamp, startTime);
-        }
-        if (endTime != null) {
-            wrapper.le(UserLedger::getTimestamp, endTime);
-        }
-        wrapper.orderByDesc(UserLedger::getTimestamp);
-
-        IPage<UserLedger> ledgerPage = userLedgerService.page(pageRequest, wrapper);
-
-        // 手动转换 DTO
-        IPage<LedgerDTO> dtoPage = ledgerPage.convert(ledger -> {
-            LedgerDTO dto = new LedgerDTO();
-            dto.setId(ledger.getId());
-            dto.setUserId(ledger.getUserId());
-            dto.setFundType(ledger.getFundType());
-            dto.setPrice(ledger.getBalanceAfter().subtract(ledger.getBalanceBefore())); // 动态计算变动金额
-            dto.setBalanceBefore(ledger.getBalanceBefore());
-            dto.setBalanceAfter(ledger.getBalanceAfter());
-            dto.setRemark(ledger.getRemark());
-            dto.setTimestamp(ledger.getTimestamp());
-            return dto;
-        });
-
-        return Result.success(dtoPage);
+        return Result.error("旧金额账本接口已下线，请使用项目线路配额账本接口");
     }
 
     /**
@@ -290,7 +252,7 @@ public class AgentController {
      */
     @SaCheckLogin
     @GetMapping("/subordinate-ledgers")
-    public Result<IPage<LedgerDTO>> viewAllSubordinateLedgers(
+    public Result<?> viewAllSubordinateLedgers(
             @RequestParam(required = false) Long targetUserId,
             @RequestParam(required = false) Date startTime,
             @RequestParam(required = false) Date endTime,
@@ -299,38 +261,7 @@ public class AgentController {
             @RequestParam(required = false) Integer ledgerType,  // 新增：接收 ledgerType 参数
             @RequestParam(defaultValue = "1") long page,
             @RequestParam(defaultValue = "10") long size) {
-
-        long agentId = StpUtil.getLoginIdAsLong();
-        checkAgentPermission(agentId); // 复用权限检查
-
-        try {
-            Page<UserLedger> pageRequest = new Page<>(page, size);
-            // 调用 service 方法时，将新增的参数传递进去
-            IPage<UserLedger> ledgerPage = userLedgerService.listSubordinateLedgers(
-                    userName, agentId, pageRequest, targetUserId, startTime, endTime, fundType, ledgerType
-            );
-
-            IPage<LedgerDTO> dtoPage = ledgerPage.convert(ledger -> {
-                LedgerDTO dto = new LedgerDTO();
-                dto.setUserName(ledger.getUserName());
-                dto.setId(ledger.getId());
-                dto.setUserId(ledger.getUserId());
-                dto.setFundType(ledger.getFundType());
-                dto.setLedgerType(ledger.getLedgerType()); // 建议：在 DTO 中也增加 ledgerType 字段
-                dto.setPrice(ledger.getBalanceAfter().subtract(ledger.getBalanceBefore()));
-                dto.setBalanceBefore(ledger.getBalanceBefore());
-                dto.setBalanceAfter(ledger.getBalanceAfter());
-                dto.setRemark(ledger.getRemark());
-                dto.setTimestamp(ledger.getTimestamp());
-                return dto;
-            });
-
-            return Result.success(dtoPage);
-
-        } catch (SecurityException e) {
-            log.warn("代理 {} 尝试查询不属于自己的下级 {} 的流水: {}", agentId, targetUserId, e.getMessage());
-            return Result.error( "权限不足，无法查询该用户的流水");
-        }
+        return Result.error("旧金额账本接口已下线，请使用项目线路配额账本接口");
     }
 
     /**
@@ -580,13 +511,7 @@ public class AgentController {
      */
     @GetMapping("/by-user/totalProfit")
     public Result<?> getTotalProfit() {
-        try{
-            StpUtil.checkLogin();
-            Long  agentId = StpUtil.getLoginIdAsLong();
-            return Result.success(userLedgerService.getTotalProfitByUserId(agentId)==null?0:userLedgerService.getTotalProfitByUserId(agentId) );
-        }catch (BusinessException e){
-            return Result.error(e.getMessage());
-        }
+        return Result.error("旧金额利润接口已下线，当前模式不再统计金额利润");
     }
 
     /**
@@ -630,31 +555,7 @@ public class AgentController {
             @RequestParam(required = false) Integer ledgerType,
             @RequestParam(defaultValue = "1") long page,
             @RequestParam(defaultValue = "10") long size) {
-
-        try {
-            // 1. 获取当前登录的代理ID
-            long agentId = StpUtil.getLoginIdAsLong();
-
-            // 2. 构造分页对象
-            Page<UserLedger> pageRequest = new Page<>(page, size);
-
-            // 3. 调用 Service 进行多条件查询
-            IPage<LedgerDTO> result = userLedgerService.listAgentOwnLedger(
-                    agentId,
-                    userName,
-                    remark,
-                    startTime,
-                    endTime,
-                    fundType,
-                    ledgerType,
-                    pageRequest
-            );
-
-            return Result.success("查询成功", result);
-        } catch (Exception e) {
-            log.error("查询代理个人账本失败", e);
-            return Result.error("查询失败：" + e.getMessage());
-        }
+        return Result.error("旧金额账本接口已下线，请使用项目线路配额账本接口");
     }
 
     /**
@@ -770,20 +671,7 @@ public class AgentController {
     @SaCheckLogin
     @PostMapping("/ledger/clear")
     public Result<?> clearMyLedger() {
-        SystemConfig systemConfig = systemConfigService.getConfig();
-        Integer days = Integer.valueOf(systemConfig.getUserDeleteDataDay());
-        try {
-            // 2. 获取当前登录代理的ID
-            long agentId = StpUtil.getLoginIdAsLong();
-            userLedgerService.deleteLedgerByDays(agentId, agentId, days, false);
-            log.info("代理 {} 清理了自己 {} 天前的账本记录", agentId, days);
-            return Result.success("个人账本记录清理成功");
-        } catch (BusinessException e) {
-            return Result.error(e.getMessage());
-        } catch (Exception e) {
-            log.error("代理清理账本异常: ", e);
-            return Result.error("系统繁忙，请稍后再试");
-        }
+        return Result.error("旧金额账本清理接口已下线，无需执行");
     }
 
     /**

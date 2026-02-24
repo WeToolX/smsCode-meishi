@@ -11,7 +11,6 @@ import com.wzz.smscode.common.Constants;
 import com.wzz.smscode.common.Result;
 import com.wzz.smscode.dto.*;
 import com.wzz.smscode.dto.CreatDTO.UserCreateDTO;
-import com.wzz.smscode.dto.EntityDTO.LedgerDTO;
 import com.wzz.smscode.dto.EntityDTO.UserDTO;
 import com.wzz.smscode.dto.LoginDTO.AdminLoginDTO;
 import com.wzz.smscode.dto.number.NumberDTO;
@@ -62,7 +61,7 @@ public class AdminController {
     private String password;
 
     @Autowired private UserService userService;
-    @Autowired private UserLedgerService userLedgerService;
+    @Autowired private UserProjectQuotaService userProjectQuotaService;
     @Autowired private NumberRecordService numberRecordService;
     @Autowired private SystemConfigService systemConfigService;
     @Autowired private ProjectService projectService;
@@ -283,9 +282,11 @@ public class AdminController {
             //- @RequestParam Long adminId,
             //- @RequestParam String password,
             @RequestParam Long targetUserId,
-            @RequestParam BigDecimal amount) {
+            @RequestParam String projectId,
+            @RequestParam String lineId,
+            @RequestParam Long count) {
         // + 管理员操作，operatorId 直接传入 0L
-        return userService.rechargeUser(targetUserId, amount, 0L);
+        return userService.rechargeUser(targetUserId, projectId, lineId, count, 0L);
     }
 
     /**
@@ -299,9 +300,11 @@ public class AdminController {
             //- @RequestParam Long adminId,
             //- @RequestParam String password,
             @RequestParam Long targetUserId,
-            @RequestParam BigDecimal amount) {
+            @RequestParam String projectId,
+            @RequestParam String lineId,
+            @RequestParam Long count) {
         // + 管理员操作，operatorId 直接传入 0L
-        return userService.deductUser(targetUserId, amount, 0L);
+        return userService.deductUser(targetUserId, projectId, lineId, count, 0L);
     }
 
     /**
@@ -344,7 +347,7 @@ public class AdminController {
      * @return
      */
     @RequestMapping(value = "/viewUserLedger", method = {RequestMethod.GET, RequestMethod.POST})
-    public Result<IPage<LedgerDTO>> viewUserLedger(
+    public Result<?> viewUserLedger(
             //- @RequestParam Long adminId,
             //- @RequestParam String password,
             @RequestParam Long targetUserId,
@@ -352,11 +355,7 @@ public class AdminController {
             @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss") Date endTime,
             @RequestParam(defaultValue = "1") long page,
             @RequestParam(defaultValue = "10") long size) {
-
-        Page pageRequest = new Page<>(page, size);
-        // + 管理员可无密码查询任意用户，传入 adminId=0L, password=null
-        IPage<LedgerDTO> resultPage = userLedgerService.listAllLedger(0L, null, null,targetUserId, startTime, endTime, pageRequest,null,null,null);
-        return Result.success("查询成功", resultPage);
+        return Result.error("旧金额账本接口已下线，请使用项目线路配额账本接口");
     }
 
     /**
@@ -373,7 +372,7 @@ public class AdminController {
      * @return
      */
     @RequestMapping(value = "/viewAllLedger", method = {RequestMethod.GET, RequestMethod.POST})
-    public Result<IPage<LedgerDTO>> viewAllLedger(
+    public Result<?> viewAllLedger(
             @RequestParam(required = false) String username,
             @RequestParam(required = false) Long filterByUserId,
             @RequestParam(required = false) String remark,
@@ -383,15 +382,7 @@ public class AdminController {
             @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss") Date endTime,
             @RequestParam(defaultValue = "1") long page,
             @RequestParam(defaultValue = "10") long size) {
-
-        Page<UserLedger> pageRequest = new Page<>(page, size);
-
-        // 调用修改后的 service 方法，并传入新增的参数
-        IPage<LedgerDTO> resultPage = userLedgerService.listAllLedger(
-                0L, null, username, filterByUserId, startTime, endTime, pageRequest, remark, fundType, ledgerType
-        );
-
-        return Result.success("查询成功", resultPage);
+        return Result.error("旧金额账本接口已下线，请使用项目线路配额账本接口");
     }
 
     /**
@@ -549,22 +540,19 @@ public class AdminController {
         } else {
             stats.setLast24hCodeRate("0.00%");
         }
-        // 创建 QueryWrapper 用于构建 SQL 查询
-        QueryWrapper<User> queryWrapper = new QueryWrapper<>();
-        // 使用 SQL 的 SUM 函数计算 balance 列的总和，并设置别名为 totalBalance
-        queryWrapper.select("sum(balance) as totalBalance");
-
-        // 执行查询，返回一个 Map
-        Map<String, Object> map = userService.getMap(queryWrapper);
-
-        BigDecimal totalBalance = BigDecimal.ZERO;
-        if (map != null && map.get("totalBalance") != null) {
-            // 将结果转换为 BigDecimal
-            totalBalance = new BigDecimal(map.get("totalBalance").toString());
+        // 统计全系统剩余配额总量，替代旧 balance 汇总。
+        QueryWrapper<UserProjectQuota> quotaQueryWrapper = new QueryWrapper<>();
+        quotaQueryWrapper.select("IFNULL(sum(available_count), 0) as totalCount");
+        Map<String, Object> quotaMap = userProjectQuotaService.getMap(quotaQueryWrapper);
+        long totalQuota = 0L;
+        if (quotaMap != null && quotaMap.get("totalCount") != null) {
+            totalQuota = Long.parseLong(quotaMap.get("totalCount").toString());
         }
 
-        stats.setTotalProfit(userLedgerService.getTotalProfit()==null?BigDecimal.ZERO:userLedgerService.getTotalProfit());
-        stats.setTotalPrice(totalBalance.setScale(2, RoundingMode.HALF_UP).toString());
+        // 旧金额利润字段已弃用，统一返回0。
+        stats.setTotalProfit(BigDecimal.ZERO);
+        // 为兼容前端旧字段 totalPrice，这里返回“总剩余配额数”。
+        stats.setTotalPrice(String.valueOf(totalQuota));
 
         return Result.success("统计数据获取成功", stats);
     }
@@ -626,7 +614,7 @@ public class AdminController {
     public Result<?> listErrorLogs(@RequestParam(defaultValue = "1") long page,
                                    @RequestParam(defaultValue = "10") long size) {
         Page pageRequest = new Page<>(page, size);
-        IPage<LedgerDTO> resultPage = errorLogService.page(pageRequest);
+        IPage<ErrorLog> resultPage = errorLogService.page(pageRequest);
 
         return Result.success(resultPage);
     }
@@ -908,19 +896,7 @@ public class AdminController {
     public Result<?> getUserProjectLineById(@RequestParam(defaultValue = "1") long pageNum,
                                             @RequestParam(defaultValue = "10") long pageSize,
                                             @RequestParam(required = false) Long userId) {
-        try {
-//            StpUtil.checkLogin();
-//            if (StpUtil.getLoginIdAsLong() != 0){
-//                return Result.error("权限不够！");
-//            }
-//            if (userId == null) {
-//                return Result.error("传入用户id不正确！");
-//            }
-        }catch (BusinessException e) {
-            return Result.error(e.getMessage());
-        }
-        Page<UserLedger> page = new Page<>(pageNum, pageSize);
-        return Result.success(userLedgerService.listUserLedgerByUSerId(userId,page));
+        return Result.error("旧金额账本接口已下线，请使用项目线路配额账本接口");
     }
 
     /**
@@ -1054,7 +1030,7 @@ public class AdminController {
             return Result.error("查询参数不能为空");
         }
         try {
-            Project project = projectService.getProject(updateDTO.getProjectId(), Integer.valueOf(updateDTO.getLineId()));
+            Project project = projectService.getProject(updateDTO.getProjectId(), updateDTO.getLineId());
             if (project == null) {
                 return Result.error("项目不存在");
             }
@@ -1201,21 +1177,7 @@ public class AdminController {
     public Result<?> clearLedgerPhysical(
             @RequestParam @NotNull Integer days,
             @RequestParam(required = false) Long targetUserId) {
-        // 1. 基本校验
-        if (days < 0) {
-            return Result.error("天数不能为负数");
-        }
-        try {
-            // 2. 获取当前登录的管理员ID（你的系统里管理员ID为 "0"）
-            Long adminId = Long.valueOf(StpUtil.getLoginId().toString());
-            userLedgerService.deleteLedgerByDays(adminId, targetUserId, days, true);
-            String scope = (targetUserId == null) ? "全系统" : "用户ID:" + targetUserId;
-            log.warn("【系统维护】管理员 {} 执行了账本物理清理，范围: {}, 保留天数: {}", adminId, scope, days);
-            return Result.success("清理成功", "已清理 " + scope + " " + days + " 天前的记录");
-        } catch (Exception e) {
-            log.error("管理员清理账本失败", e);
-            return Result.error("清理失败：" + e.getMessage());
-        }
+        return Result.error("旧金额账本清理接口已下线，无需执行");
     }
 
     /**

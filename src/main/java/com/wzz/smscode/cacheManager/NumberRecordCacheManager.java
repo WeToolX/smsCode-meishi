@@ -48,13 +48,13 @@ public class NumberRecordCacheManager {
 
     // --- 项目配置缓存 ---
 
-    public void cacheProject(String projectId, Integer lineId, Project project) {
+    public void cacheProject(String projectId, String lineId, Project project) {
         if (project == null) return;
         String key = PREFIX_PROJECT + projectId + ":" + lineId;
         redisTemplate.opsForValue().set(key, project, PROJECT_EXPIRE, TimeUnit.MINUTES);
     }
 
-    public Project getProject(String projectId, Integer lineId) {
+    public Project getProject(String projectId, String lineId) {
         String key = PREFIX_PROJECT + projectId + ":" + lineId;
         return (Project) redisTemplate.opsForValue().get(key);
     }
@@ -62,7 +62,7 @@ public class NumberRecordCacheManager {
     /**
      * 清除项目缓存
      */
-    public void evictProject(String projectId, Integer lineId) {
+    public void evictProject(String projectId, String lineId) {
         if (projectId == null || lineId == null) return;
         String key = PREFIX_PROJECT + projectId + ":" + lineId;
         redisTemplate.delete(key);

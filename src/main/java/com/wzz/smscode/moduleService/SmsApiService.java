@@ -439,7 +439,7 @@ public class SmsApiService {
      */
     public String manualLogin(String projectId, String lineId) {
         // 1. 查询项目
-        Project project = projectService.getProject(projectId,Integer.valueOf(lineId));
+        Project project = projectService.getProject(projectId, lineId);
         if (project == null) {
             throw new BusinessException("未找到项目ID为 " + projectId + " 的项目");
         }

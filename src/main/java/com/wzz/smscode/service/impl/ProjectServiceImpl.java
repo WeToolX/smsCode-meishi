@@ -45,6 +45,9 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
     private PriceTemplateItemService priceTemplateItemService;
 
     @Autowired
+    private UserProjectQuotaService userProjectQuotaService;
+
+    @Autowired
     private NumberRecordCacheManager cacheManager; // 注入缓存管理器
 
     @Transactional(rollbackFor = Exception.class)
@@ -59,7 +62,7 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
             return false;
         }
         String oldProjectId = existingProject.getProjectId();
-        Integer oldLineId = Integer.valueOf(existingProject.getLineId());
+        String oldLineId = existingProject.getLineId();
         Project projectToUpdate = new Project();
         BeanUtils.copyProperties(projectDTO, projectToUpdate);
         boolean projectUpdated = this.updateById(projectToUpdate);
@@ -68,7 +71,7 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
             throw new BusinessException("更新项目基础信息失败，操作已回滚。");
         }
         cacheManager.evictProject(oldProjectId, oldLineId);
-        cacheManager.evictProject(projectDTO.getProjectId(), Integer.valueOf(projectDTO.getLineId()));
+        cacheManager.evictProject(projectDTO.getProjectId(), projectDTO.getLineId());
         log.info("项目基础信息已更新并清理缓存, ID: {}", projectDTO.getId());
         log.info("开始同步更新关联的价格模板项配置...");
         LambdaUpdateWrapper<PriceTemplateItem> updateWrapper = new LambdaUpdateWrapper<>();
@@ -96,7 +99,7 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
     }
 
     @Override
-    public Project getProject(String projectId, Integer lineId) {
+    public Project getProject(String projectId, String lineId) {
 
         LambdaQueryWrapper<Project> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(Project::getProjectId, projectId)
@@ -138,75 +141,43 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
             throw new BusinessException("用户ID和项目ID不能为空");
         }
 
-        // 2. 获取用户信息（为了拿到 templateId 和 projectBlacklist）
+        // 2. 获取用户信息
         User user = userService.getById(userId);
         if (user == null) {
             throw new BusinessException("用户不存在");
         }
-
-        // 如果用户没有绑定模板，则无可用线路
-        if (user.getTemplateId() == null) {
+        // 3. 根据配额过滤线路：只有配额>0的线路才有权限
+        List<UserProjectQuota> quotaList = userProjectQuotaService.list(new LambdaQueryWrapper<UserProjectQuota>()
+                .eq(UserProjectQuota::getUserId, userId)
+                .eq(UserProjectQuota::getProjectId, projectId)
+                .gt(UserProjectQuota::getAvailableCount, 0)
+                .select(UserProjectQuota::getLineId));
+        if (CollectionUtils.isEmpty(quotaList)) {
             return Collections.emptyList();
         }
-
-        // 3. 从价格模板项中查询该项目下的配置项
-        // 注意：入参 projectId 是 String，数据库是 Long，需要转换
-        LambdaQueryWrapper<PriceTemplateItem> itemQuery = new LambdaQueryWrapper<>();
-        itemQuery.eq(PriceTemplateItem::getTemplateId, user.getTemplateId())
-                .eq(PriceTemplateItem::getProjectId, Long.valueOf(projectId))
-                .select(PriceTemplateItem::getLineId, PriceTemplateItem::getProjectTableId, PriceTemplateItem::getProjectId);
-
-        List<PriceTemplateItem> templateItems = priceTemplateItemService.list(itemQuery);
-
-        if (CollectionUtils.isEmpty(templateItems)) {
-            return Collections.emptyList();
-        }
-
-        // 4. 解析黑名单 (格式: "pid-lid,pid-lid")
-//        Set<String> blacklist = new HashSet<>();
-//        if (StringUtils.hasText(user.getProjectBlacklist())) {
-//            String[] blocks = user.getProjectBlacklist().split(",");
-//            blacklist.addAll(Arrays.asList(blocks));
-//        }
-
-        // 5. 提取项目主表ID，用于查询线路名称和系统开关状态
-        List<Long> projectTableIds = templateItems.stream()
-                .map(PriceTemplateItem::getProjectTableId)
+        List<String> lineIds = quotaList.stream()
+                .map(UserProjectQuota::getLineId)
                 .distinct()
                 .collect(Collectors.toList());
 
-        if (CollectionUtils.isEmpty(projectTableIds)) {
+        // 4. 查询项目线路元数据，仅返回系统中启用的线路
+        List<Project> projects = this.list(new LambdaQueryWrapper<Project>()
+                .eq(Project::getProjectId, projectId)
+                .in(Project::getLineId, lineIds)
+                .eq(Project::isStatus, true)
+                .select(Project::getLineId, Project::getLineName));
+
+        if (CollectionUtils.isEmpty(projects)) {
             return Collections.emptyList();
         }
-        LambdaQueryWrapper<Project> projectQuery = new LambdaQueryWrapper<>();
-        projectQuery.in(Project::getId, projectTableIds)
-                .select(Project::getId, Project::getLineName);
 
-        Map<Long, String> activeProjectMap = this.list(projectQuery).stream()
-                .collect(Collectors.toMap(Project::getId, Project::getLineName));
-
-        // 7. 组装结果
-        List<Map<String, Object>> result = new ArrayList<>();
-
-        for (PriceTemplateItem item : templateItems) {
-            // A. 黑名单过滤
-//            String key = item.getProjectId() + "-" + item.getLineId();
-//            if (blacklist.contains(key)) {
-//                continue;
-//            }
-
-            // B. 系统状态校验 & 名称获取
-            // 如果 activeProjectMap 中不存在该ID，说明该项目在系统层面被禁用了
-            String lineName = activeProjectMap.get(item.getProjectTableId());
-            if (lineName != null) {
-                Map<String, Object> map = new HashMap<>();
-                map.put("lineId", item.getLineId());
-                map.put("lineName", lineName);
-                result.add(map);
-            }
-        }
-
-        return result;
+        // 5. 组装返回结构
+        return projects.stream().map(project -> {
+            Map<String, Object> map = new HashMap<>();
+            map.put("lineId", project.getLineId());
+            map.put("lineName", project.getLineName());
+            return map;
+        }).collect(Collectors.toList());
     }
 
     @Override

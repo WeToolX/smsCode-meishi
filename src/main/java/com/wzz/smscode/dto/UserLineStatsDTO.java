@@ -8,7 +8,7 @@ public class UserLineStatsDTO {
     private Long userId;
     private String userName;
     private String projectId;
-    private Integer lineId;
+    private String lineId;
 
     private Long totalNumbers; // 取号总数
     private Long totalCodes;   // 取码总数 (status=2)

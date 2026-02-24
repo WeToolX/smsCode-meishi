@@ -10,7 +10,6 @@ import com.wzz.smscode.cacheManager.NumberRecordCacheManager;
 import com.wzz.smscode.common.CommonResultDTO;
 import com.wzz.smscode.common.Constants;
 import com.wzz.smscode.dto.BatchChargeRequestDTO;
-import com.wzz.smscode.dto.CreatDTO.LedgerCreationDTO;
 import com.wzz.smscode.dto.CreatDTO.UserCreateDTO;
 import com.wzz.smscode.dto.EntityDTO.UserDTO;
 import com.wzz.smscode.dto.LoginDTO.UserLoginDto;
@@ -25,7 +24,6 @@ import com.wzz.smscode.dto.update.UpdateUserDto;
 import com.wzz.smscode.dto.update.UserUpdateDtoByUser;
 import com.wzz.smscode.dto.update.UserUpdatePasswardDTO;
 import com.wzz.smscode.entity.*;
-import com.wzz.smscode.enums.FundType;
 import com.wzz.smscode.exception.BusinessException;
 import com.wzz.smscode.mapper.NumberRecordMapper;
 import com.wzz.smscode.mapper.UserMapper;
@@ -50,7 +48,6 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.LocalTime;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -58,12 +55,11 @@ import java.util.stream.Collectors;
 @Service
 public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements UserService {
     @Autowired @Lazy private ProjectService projectService;
-    @Autowired private UserLedgerService ledgerService;
     @Autowired private UserMapper userMapper;
     @Autowired private NumberRecordMapper numberRecordMapper;
     @Autowired private UserProjectLineService userProjectLineService;
     @Autowired @Lazy private PriceTemplateService priceTemplateService;
-    @Autowired private UserLedgerService userLedgerService;
+    @Autowired private UserProjectQuotaService userProjectQuotaService;
 
     @Autowired
     private NumberRecordCacheManager cacheManager; // 注入缓存管理器
@@ -89,7 +85,14 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         if (agent == null) {
             throw new BusinessException("代理用户不存在");
         }
-        statsDTO.setMyBalance(agent.getBalance());
+        long selfTotalQuota = userProjectQuotaService.list(new LambdaQueryWrapper<UserProjectQuota>()
+                        .eq(UserProjectQuota::getUserId, agentId))
+                .stream()
+                .map(UserProjectQuota::getAvailableCount)
+                .filter(Objects::nonNull)
+                .mapToLong(Long::longValue)
+                .sum();
+        statsDTO.setMyBalance(BigDecimal.valueOf(selfTotalQuota));
         LambdaQueryWrapper<User> subUsersQuery = new LambdaQueryWrapper<User>().eq(User::getParentId, agentId);
         List<User> subUsers = this.list(subUsersQuery);
         if (subUsers.isEmpty()) {
@@ -97,25 +100,12 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
             statsDTO.setTotalSubUsers(0L);
             statsDTO.setTodaySubUsersRecharge(BigDecimal.ZERO);
             statsDTO.setSubUsersCodeRate(0.0);
+            statsDTO.setTotalProfit(BigDecimal.ZERO);
             return statsDTO;
         }
         // 3. 计算"我的下级总人数"
         statsDTO.setTotalSubUsers((long) subUsers.size());
-        List<Long> subUserIds = subUsers.stream().map(User::getId).collect(Collectors.toList());
-        // 4. 计算"我的下级所有人今日充值"
-        LocalDateTime todayStart = LocalDateTime.of(LocalDate.now(), LocalTime.MIN);
-        LocalDateTime todayEnd = LocalDateTime.of(LocalDate.now(), LocalTime.MAX);
-        LambdaQueryWrapper<UserLedger> ledgerWrapper = new LambdaQueryWrapper<>();
-        ledgerWrapper.in(UserLedger::getUserId, subUserIds)
-                .eq(UserLedger::getFundType, FundType.AGENT_RECHARGE.getCode())
-                .eq(UserLedger::getLedgerType, 1)
-                .ge(UserLedger::getTimestamp, todayStart)
-                .le(UserLedger::getTimestamp, todayEnd);
-        List<UserLedger> todayRechargeLedgers = userLedgerService.list(ledgerWrapper);
-        BigDecimal totalRecharge = todayRechargeLedgers.stream()
-                .map(UserLedger::getPrice)
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
-        statsDTO.setTodaySubUsersRecharge(totalRecharge);
+        statsDTO.setTodaySubUsersRecharge(BigDecimal.ZERO);
         // 5. 计算"我的下级的回码率"
         long totalGetCount = subUsers.stream().mapToLong(User::getTotalGetCount).sum();
         long totalCodeCount = subUsers.stream().mapToLong(User::getTotalCodeCount).sum();
@@ -128,7 +118,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
                     .setScale(2, RoundingMode.HALF_UP).doubleValue());
         }
 
-        statsDTO.setTotalProfit(userLedgerService.getTotalProfitByUserId(agentId)==null?BigDecimal.ZERO:userLedgerService.getTotalProfitByUserId(agentId));
+        statsDTO.setTotalProfit(BigDecimal.ZERO);
 
         return statsDTO;
     }
@@ -365,12 +355,16 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     }
 
     @Override
-    public CommonResultDTO<BigDecimal> getBalance(String userName, String password) {
+    public CommonResultDTO<Long> getBalance(String userName, String password, String projectId, String lineId) {
         User user = authenticateUserByUserName(userName, password,false);
         if (user == null) {
             return CommonResultDTO.error(Constants.ERROR_AUTH_FAILED, "用户ID或密码错误");
         }
-        return CommonResultDTO.success("查询成功", user.getBalance());
+        if (!StringUtils.hasText(projectId) || !StringUtils.hasText(lineId)) {
+            return CommonResultDTO.error(Constants.ERROR_SYSTEM_ERROR, "项目ID和线路ID不能为空");
+        }
+        long count = userProjectQuotaService.getAvailableCount(user.getId(), projectId, lineId);
+        return CommonResultDTO.success("查询成功", count);
     }
 
 
@@ -411,15 +405,6 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         }
         List<User> existingUsers = this.listByUserName(dto.getUsername());
 
-        // 校验模板是否存在
-        if (dto.getTemplateId() == null) {
-            throw new BusinessException("必须指定价格模板");
-        }
-        PriceTemplate template = priceTemplateService.getById(dto.getTemplateId());
-        if (template == null) {
-            throw new BusinessException("指定的价格模板不存在");
-        }
-
         // 判断列表是否不为空
         if (!existingUsers.isEmpty()) {
             // 您甚至可以记录一个更详细的日志
@@ -451,9 +436,6 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
 
         log.info("创建的用户：{}", user);
 
-        // 设置模板ID
-        user.setTemplateId(dto.getTemplateId());
-
         // 设置黑名单 (List -> String)
         if (dto.getBlacklistedProjects() != null && !dto.getBlacklistedProjects().isEmpty()) {
             user.setProjectBlacklist(String.join(",", dto.getBlacklistedProjects()));
@@ -463,44 +445,9 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
             throw new RuntimeException("创建用户失败");
         }
 
-        // 4. [核心改造] 处理价格配置
-//        processAndSaveUserPrices(user, dto.getProjectPrices(), operator);
-        // 【需求实现】将用户ID保存到模板数据库中的用户ID列表中
-        priceTemplateService.addUserToTemplate(user.getTemplateId(), user.getId());
-
         BigDecimal initialBalance = dto.getInitialBalance();
         if (initialBalance != null && initialBalance.compareTo(BigDecimal.ZERO) > 0) {
-            try {
-                // 5.1 为新用户充值
-                LedgerCreationDTO userRechargeDto = LedgerCreationDTO.builder()
-                        .userId(user.getId())
-                        .amount(initialBalance)
-                        .ledgerType(1)
-                        .fundType(FundType.AGENT_RECHARGE)
-                        .remark("新用户初始充值")
-                        .build();
-                ledgerService.createLedgerAndUpdateBalance(userRechargeDto);
-
-                // 5.2 如果操作员不是管理员，则从操作员账户扣款
-                if (!isAdmin) {
-                    LedgerCreationDTO operatorDeductDto = LedgerCreationDTO.builder()
-                            .userId(operatorId)
-                            .amount(initialBalance)
-                            .ledgerType(0)
-                            .fundType(FundType.AGENT_DEDUCTION)
-                            .remark("为下级用户 " + user.getUserName() + " 充值")
-                            .build();
-                    ledgerService.createLedgerAndUpdateBalance(operatorDeductDto);
-                }
-            } catch (BusinessException e) {
-                TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
-                log.error("为新用户 {} 分配初始资金失败: {}", user.getUserName(), e.getMessage());
-                throw new BusinessException("为新用户分配初始资金失败: " + e.getMessage());
-            } catch (Exception e) {
-                TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
-                log.error("为新用户 {} 分配初始资金时发生系统错误", user.getUserName(), e);
-                throw new RuntimeException("系统错误，创建用户资金记录失败", e);
-            }
+            log.warn("新计费模式下不再使用 initialBalance，创建用户时已忽略该参数。userId={}", user.getId());
         }
         return true;
     }
@@ -565,9 +512,12 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
      */
     @Transactional(rollbackFor = Exception.class)
     @Override
-    public CommonResultDTO<?> chargeUser(Long targetUserId, BigDecimal amount, Long operatorId, boolean isRecharge) {
-        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
-            return CommonResultDTO.error(-5, "金额必须为正数");
+    public CommonResultDTO<?> chargeUser(Long targetUserId, String projectId, String lineId, Long count, Long operatorId, boolean isRecharge) {
+        if (!StringUtils.hasText(projectId) || !StringUtils.hasText(lineId)) {
+            return CommonResultDTO.error(-5, "项目ID和线路ID不能为空");
+        }
+        if (count == null || count <= 0) {
+            return CommonResultDTO.error(-5, "配额数量必须为正数");
         }
 
         User targetUser = this.getById(targetUserId);
@@ -584,27 +534,23 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         }
 
         try {
-
-            // 1. 操作目标用户
-            LedgerCreationDTO targetLedger = LedgerCreationDTO.builder()
-                    .userId(targetUserId)
-                    .amount(amount) // 金额始终为正
-                    .ledgerType(isRecharge ? 1 : 0) // 1-入账, 0-出账
-                    .fundType(isRecharge ? FundType.AGENT_RECHARGE : FundType.AGENT_DEDUCTION)
-                    .remark((isRecharge ? "上级充值: " : "上级扣款: ") + operatorId)
-                    .build();
-            ledgerService.createLedgerAndUpdateBalance(targetLedger);
-
-            // 2. 如果操作员不是管理员，则反向操作操作员自己的账户
-            if (!isAdmin) {
-                LedgerCreationDTO operatorLedger = LedgerCreationDTO.builder()
-                        .userId(operatorId)
-                        .amount(amount) // 金额始终为正
-                        .ledgerType(isRecharge ? 0 : 1) // 代理是反向操作：给别人充值=自己扣款
-                        .fundType(isRecharge ? FundType.AGENT_DEDUCTION : FundType.AGENT_RECHARGE)
-                        .remark((isRecharge ? "为下级充值: " : "从下级扣款: ") + targetUserId)
-                        .build();
-                ledgerService.createLedgerAndUpdateBalance(operatorLedger);
+            String bizNo = "QOP_" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString().replace("-", "");
+            if (isAdmin) {
+                if (isRecharge) {
+                    userProjectQuotaService.addQuota(targetUserId, projectId, lineId, count,
+                            bizNo + "_IN", 0L, "后台充值项目线路配额");
+                } else {
+                    userProjectQuotaService.deductQuota(targetUserId, projectId, lineId, count,
+                            bizNo + "_OUT", 0L, "后台扣减项目线路配额");
+                }
+            } else {
+                if (isRecharge) {
+                    userProjectQuotaService.transferQuota(operatorId, targetUserId, projectId, lineId, count,
+                            bizNo, operatorId, "为下级充值扣减同项目线路配额", "收到上级充值配额");
+                } else {
+                    userProjectQuotaService.transferQuota(targetUserId, operatorId, projectId, lineId, count,
+                            bizNo, operatorId, "被上级扣减项目线路配额", "从下级扣减回收配额");
+                }
             }
         } catch (BusinessException e) {
             log.info("出现错误：{}", e.getMessage());
@@ -620,13 +566,13 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     }
 
     @Override
-    public CommonResultDTO<?> rechargeUser(Long targetUserId, BigDecimal amount, Long operatorId) {
-        return chargeUser(targetUserId, amount, operatorId, true);
+    public CommonResultDTO<?> rechargeUser(Long targetUserId, String projectId, String lineId, Long count, Long operatorId) {
+        return chargeUser(targetUserId, projectId, lineId, count, operatorId, true);
     }
 
     @Override
-    public CommonResultDTO<?> deductUser(Long targetUserId, BigDecimal amount, Long operatorId) {
-        return chargeUser(targetUserId, amount, operatorId, false);
+    public CommonResultDTO<?> deductUser(Long targetUserId, String projectId, String lineId, Long count, Long operatorId) {
+        return chargeUser(targetUserId, projectId, lineId, count, operatorId, false);
     }
 
 
@@ -649,12 +595,8 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
 
 
     /**
-     * [已废弃 -> 移除]
-     * 安全地更新用户余额（带悲观锁）的方法已被移除。
-     * 所有资金变动均通过 UserLedgerService.createLedgerAndUpdateBalance() 实现，
-     * 该方法内部已包含锁和事务管理，确保了数据一致性。
+     * 说明：旧金额余额更新逻辑已删除，当前仅保留项目线路配额模式。
      */
-    // private void updateBalanceWithLock(Long userId, BigDecimal amount) { ... }
     /**
      * [重构] 将 User 实体转换为 UserDTO，价格从新表获取
      */
@@ -738,7 +680,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
                 log.info("为新用户生成初始价格：成功设置为项目最高价");
                 return operatorLines.stream().map(line -> {
                     ProjectPriceDTO dto = new ProjectPriceDTO();
-                    Project project = projectService.getProject(line.getProjectId(), Integer.valueOf(line.getLineId()));
+                    Project project = projectService.getProject(line.getProjectId(), line.getLineId());
                     dto.setProjectId(Long.parseLong(line.getProjectId()));
                     dto.setLineId(Long.parseLong(line.getLineId()));
                     dto.setPrice(project.getPriceMax());
@@ -803,14 +745,15 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
      */
     @Transactional(rollbackFor = Exception.class)
     @Override
-    public void rechargeUserFromAgentBalance(Long targetUserId, BigDecimal amount, Long agentId) {
-        // 步骤 0: 校验金额必须为正数
-        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
-            throw new BusinessException("操作金额必须为正数");
+    public void rechargeUserFromAgentBalance(Long targetUserId, String projectId, String lineId, Long count, Long agentId) {
+        if (!StringUtils.hasText(projectId) || !StringUtils.hasText(lineId)) {
+            throw new BusinessException("项目ID和线路ID不能为空");
+        }
+        if (count == null || count <= 0) {
+            throw new BusinessException("操作数量必须为正数");
         }
 
         // 步骤 1: 获取代理和目标用户信息，用于权限校验和记录备注
-        // 注意: 此处不需要加锁(FOR UPDATE)，因为加锁操作由下游的 createLedgerAndUpdateBalance 方法完成
         User agent = this.getById(agentId);
         User targetUser = this.getById(targetUserId);
 
@@ -825,32 +768,18 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         if (!agentId.equals(targetUser.getParentId())) {
             throw new SecurityException("无权操作非下级用户");
         }
-
-        // 步骤 3: 代理账户出账
-        // 构建代理扣款的请求DTO
-        LedgerCreationDTO agentDeductRequest = LedgerCreationDTO.builder()
-                .userId(agentId)
-                .amount(amount)
-                .ledgerType(0) // 0-出账
-                .fundType(FundType.AGENT_DEDUCTION) // 假设有此类型：代理为下级充值扣款
-                .remark(String.format("为用户 %s 充值", targetUser.getUserName()))
-                .build();
-
-        // 调用核心服务，该方法会检查代理余额是否充足，如果不足会抛出异常，整个事务回滚
-        userLedgerService.createLedgerAndUpdateBalance(agentDeductRequest);
-
-        // 步骤 4: 用户账户入账
-        // 构建用户充值的请求DTO
-        LedgerCreationDTO userRechargeRequest = LedgerCreationDTO.builder()
-                .userId(targetUserId)
-                .amount(amount)
-                .ledgerType(1) // 1-入账
-                .fundType(FundType.AGENT_RECHARGE) // 假设有此类型：代理充值
-                .remark(String.format("收到代理 %s 的充值", agent.getUserName()))
-                .build();
-
-        // 调用核心服务
-        userLedgerService.createLedgerAndUpdateBalance(userRechargeRequest);
+        String bizNo = "AGENT_RECHARGE_" + System.currentTimeMillis() + "_" + targetUserId;
+        userProjectQuotaService.transferQuota(
+                agentId,
+                targetUserId,
+                projectId,
+                lineId,
+                count,
+                bizNo,
+                agentId,
+                String.format("为用户 %s 充值扣减配额", targetUser.getUserName()),
+                String.format("收到代理 %s 充值配额", agent.getUserName())
+        );
     }
 
     /**
@@ -862,10 +791,12 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
      */
     @Transactional(rollbackFor = Exception.class)
     @Override
-    public void deductUserToAgentBalance(Long targetUserId, BigDecimal amount, Long agentId) {
-        // 步骤 0: 校验金额
-        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
-            throw new BusinessException("操作金额必须为正数");
+    public void deductUserToAgentBalance(Long targetUserId, String projectId, String lineId, Long count, Long agentId) {
+        if (!StringUtils.hasText(projectId) || !StringUtils.hasText(lineId)) {
+            throw new BusinessException("项目ID和线路ID不能为空");
+        }
+        if (count == null || count <= 0) {
+            throw new BusinessException("操作数量必须为正数");
         }
 
         // 步骤 1: 获取用户信息用于校验和备注
@@ -882,32 +813,18 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         if (!agentId.equals(targetUser.getParentId())) {
             throw new SecurityException("无权操作非下级用户");
         }
-
-        // 步骤 3: 用户账户出账
-        // 构建用户被扣款的请求DTO
-        LedgerCreationDTO userDeductRequest = LedgerCreationDTO.builder()
-                .userId(targetUserId)
-                .amount(amount)
-                .ledgerType(0) // 0-出账
-                .fundType(FundType.AGENT_DEDUCTION) // 假设有此类型：代理扣款
-                .remark(String.format("被代理 %s 扣款", agent.getUserName()))
-                .build();
-
-        // 调用核心服务，该方法会检查用户余额是否充足
-        userLedgerService.createLedgerAndUpdateBalance(userDeductRequest);
-
-        // 步骤 4: 代理账户入账
-        // 构建代理收款的请求DTO
-        LedgerCreationDTO agentAddRequest = LedgerCreationDTO.builder()
-                .userId(agentId)
-                .amount(amount)
-                .ledgerType(1) // 1-入账
-                .fundType(FundType.AGENT_RECHARGE) // 假设有此类型：从下级扣款入账
-                .remark(String.format("从用户 %s 扣款", targetUser.getUserName()))
-                .build();
-
-        // 调用核心服务
-        userLedgerService.createLedgerAndUpdateBalance(agentAddRequest);
+        String bizNo = "AGENT_DEDUCT_" + System.currentTimeMillis() + "_" + targetUserId;
+        userProjectQuotaService.transferQuota(
+                targetUserId,
+                agentId,
+                projectId,
+                lineId,
+                count,
+                bizNo,
+                agentId,
+                String.format("被代理 %s 扣减配额", agent.getUserName()),
+                String.format("从用户 %s 回收配额", targetUser.getUserName())
+        );
     }
 
     @Transactional
@@ -929,7 +846,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         if (updateDTO.getAgentPrice() != null) {
             // 如果价格字段被传递了，执行价格校验逻辑
 //            Project project = projectService.getById(userProjectLine.getProjectTableId());
-            Project project = projectService.getProject(updateDTO.getProjectId(), Integer.valueOf(updateDTO.getLineId()));
+            Project project = projectService.getProject(updateDTO.getProjectId(), updateDTO.getLineId());
             if (project == null) {
                 log.error("数据不一致：UserProjectLine ID {} 对应的项目在线路表(project)中未找到", userProjectLine.getProjectTableId());
                 throw new BusinessException("更新失败：项目基础信息不存在。");
@@ -1023,7 +940,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
             List<UserProjectLine> userLines = linesByUserId.getOrDefault(subUser.getId(), Collections.emptyList());
 
             List<ProjectPriceInfoDTO> prices = userLines.stream().map(line -> {
-                Project project = projectService.getProject(line.getProjectId(), Integer.valueOf(line.getLineId()));
+                Project project = projectService.getProject(line.getProjectId(), line.getLineId());
                 ProjectPriceInfoDTO priceInfo = new ProjectPriceInfoDTO();
                 priceInfo.setId(line.getId());
                 priceInfo.setProjectName(line.getProjectName());
@@ -1156,155 +1073,18 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     @Transactional(rollbackFor = Exception.class)
     @Override
     public void processRebates(NumberRecord successfulRecord) {
-        log.info("开始为记录ID {} 处理上级代理返款...", successfulRecord.getId());
-
-        // 1. 获取初始信息
-        BigDecimal lastLevelPrice = successfulRecord.getPrice(); // 这是最终用户支付的价格
-        String projectId = successfulRecord.getProjectId();
-        Integer lineId = successfulRecord.getLineId();
-        User currentUser = this.getById(successfulRecord.getUserId());
-
-        if (currentUser == null) {
-            log.error("返款流程失败：找不到ID为 {} 的初始用户。", successfulRecord.getUserId());
+        // 新计费模式已改为项目线路配额计费，旧金额返点逻辑废弃。
+        if (successfulRecord == null) {
+            log.info("配额模式下跳过返点流程，记录为空");
             return;
         }
-
-        // 2. 循环向上追溯代理链，直到顶层代理（parentId 为 0 或 null）
-        while (currentUser.getParentId() != null && currentUser.getParentId() != 0L) {
-            Long parentId = currentUser.getParentId();
-            User parentUser = this.getById(parentId);
-
-            if (parentUser.getTemplateId() == null) {
-                log.warn("代理 {} 无模板配置，跳过返点", parentId);
-                break;
-            }
-
-            PriceTemplateItem parentItem = priceTemplateService.getPriceConfig(
-                    parentUser.getTemplateId(),
-                    successfulRecord.getProjectId(),
-                    successfulRecord.getLineId()
-            );
-
-            if (parentItem == null) {
-                // 上级没有配置该项目，可能意味着无法获利或数据异常
-                break;
-            }
-
-            BigDecimal parentPrice = parentItem.getPrice(); // 上级的拿货价
-
-            // 4. 计算返款金额（即利润）
-            BigDecimal rebateAmount = lastLevelPrice.subtract(parentPrice);
-
-            // 5. 如果利润为正数，则为上级代理执行返款
-            if (rebateAmount.compareTo(BigDecimal.ZERO) > 0) {
-                log.info("为代理 {} (ID: {}) 返款: {}。计算方式: (下级价格){} - (本级价格){}",
-                        parentUser.getUserName(), parentId, rebateAmount, lastLevelPrice, parentPrice);
-
-                // 6. 创建返款账本记录，并更新代理余额（由 createLedgerAndUpdateBalance 方法原子化完成）
-                LedgerCreationDTO rebateLedger = LedgerCreationDTO.builder()
-                        .userId(parentId)
-                        .amount(rebateAmount)
-                        .ledgerType(1) // 1-入账
-                        .fundType(FundType.ADMIN_REBATE) // 使用我们新定义的返款类型
-                        .remark(String.format("下级用户 %s 业务成功，返款", currentUser.getUserName()))
-                        .phoneNumber(successfulRecord.getPhoneNumber())
-                        .code(successfulRecord.getCode())
-                        .projectId(projectId)
-                        .lineId(lineId)
-                        .build();
-                try {
-                    // 调用统一的账本服务，它会处理余额更新和流水记录
-                    ledgerService.createLedgerAndUpdateBalance(rebateLedger);
-                } catch (Exception e) {
-                    log.error("为代理 {} (ID: {}) 返款时失败，事务将回滚。错误: {}", parentUser.getUserName(), parentId, e.getMessage());
-                    // 向上抛出异常，以确保整个事务（包括初始用户的扣费）都能回滚
-                    throw new BusinessException("为代理 " + parentUser.getUserName() + " 返款失败：" + e.getMessage());
-                }
-            } else {
-                log.warn("代理 {} (ID: {}) 的返款金额为零或负数 ({})，不执行返款。下级价格: {}, 本级价格: {}",
-                        parentUser.getUserName(), parentId, rebateAmount, lastLevelPrice, parentPrice);
-            }
-
-            // 7. 更新变量，为下一轮循环做准备
-            currentUser = parentUser;
-            lastLevelPrice = parentPrice;
-        }
-
-        log.info("记录ID {} 的返款流程处理完毕。", successfulRecord.getId());
+        log.info("配额模式下跳过返点流程，记录ID={}", successfulRecord.getId());
     }
 
     @Transactional(rollbackFor = Exception.class)
     @Override
     public int batchFundOperation(BatchChargeRequestDTO dto, Long operatorId) {
-        // 1. 基础校验
-        if (CollectionUtils.isEmpty(dto.getUserIds())) {
-            throw new BusinessException("请至少选择一个用户");
-        }
-        if (dto.getAmount() == null || dto.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
-            throw new BusinessException("金额必须为正数");
-        }
-
-        boolean isRecharge = Boolean.TRUE.equals(dto.getIsRecharge());
-        boolean isAdmin = (operatorId == 0L);
-
-        // 如果是代理操作，先获取代理信息
-        User operator = null;
-        if (!isAdmin) {
-            operator = this.findAndLockById(operatorId);
-            if (operator == null) throw new BusinessException("操作员不存在");
-            if (operator.getIsAgent() != 1) throw new BusinessException("无权操作");
-
-            // 如果是充值，先检查代理余额是否足够支付所有人的总和
-            if (isRecharge) {
-                BigDecimal totalNeed = dto.getAmount().multiply(new BigDecimal(dto.getUserIds().size()));
-                if (operator.getBalance().compareTo(totalNeed) < 0) {
-                    throw new BusinessException("您的余额不足以支付本次批量充值，共需: " + totalNeed);
-                }
-            }
-        }
-
-        int successCount = 0;
-
-        // 2. 循环处理每一个用户
-        for (Long targetUserId : dto.getUserIds()) {
-            // 防止操作自己
-            if (targetUserId.equals(operatorId)) {
-                continue;
-            }
-
-            // --- A. 操作目标用户 ---
-            LedgerCreationDTO targetLedger = LedgerCreationDTO.builder()
-                    .userId(targetUserId)
-                    .amount(dto.getAmount())
-                    .ledgerType(isRecharge ? 1 : 0) // 1入账，0出账
-                    // 根据操作类型选择资金类型
-                    .fundType(isRecharge ? FundType.AGENT_RECHARGE : FundType.AGENT_DEDUCTION)
-                    .remark((StringUtils.hasText(dto.getRemark()) ? dto.getRemark() : "") +
-                            (isRecharge ? " [批量充值]" : " [批量扣款]"))
-                    .build();
-
-            // 调用核心账本服务 (会自动处理加锁、余额计算、流水写入)
-            userLedgerService.createLedgerAndUpdateBalance(targetLedger);
-
-            // --- B. 如果是代理操作，需反向操作代理账户 ---
-            if (!isAdmin) {
-                // 如果是给下级充值(isRecharge=true)，代理自己要扣钱(ledgerType=0)
-                // 如果是扣下级钱(isRecharge=false)，代理自己要加钱(ledgerType=1)
-                LedgerCreationDTO operatorLedger = LedgerCreationDTO.builder()
-                        .userId(operatorId)
-                        .amount(dto.getAmount())
-                        .ledgerType(isRecharge ? 0 : 1)
-                        .fundType(isRecharge ? FundType.AGENT_DEDUCTION : FundType.AGENT_RECHARGE)
-                        .remark("对用户 " + targetUserId + (isRecharge ? " 批量充值扣除" : " 批量扣款回收"))
-                        .build();
-
-                userLedgerService.createLedgerAndUpdateBalance(operatorLedger);
-            }
-
-            successCount++;
-        }
-
-        return successCount;
+        throw new BusinessException("旧金额批量资金接口已弃用，请改用项目线路配额接口");
     }
 
 }

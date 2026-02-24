@@ -37,7 +37,7 @@ public interface UserService extends IService<User> {
     void deleteSubUsersBatch(List<Long> userIds, Long agentId);
 
 
-    CommonResultDTO<BigDecimal> getBalance(String userName, String password);
+    CommonResultDTO<Long> getBalance(String userName, String password, String projectId, String lineId);
 
     @Transactional
     boolean createUser(UserCreateDTO dto, Long operatorId);
@@ -47,11 +47,11 @@ public interface UserService extends IService<User> {
     IPage<User> listSubUsers(String userName, Long operatorId, IPage<User> page);
 
     @Transactional
-    CommonResultDTO<?> chargeUser(Long targetUserId, BigDecimal amount, Long operatorId, boolean isRecharge);
+    CommonResultDTO<?> chargeUser(Long targetUserId, String projectId, String lineId, Long count, Long operatorId, boolean isRecharge);
 
-    CommonResultDTO<?> rechargeUser(Long targetUserId, BigDecimal amount, Long operatorId);
+    CommonResultDTO<?> rechargeUser(Long targetUserId, String projectId, String lineId, Long count, Long operatorId);
 
-    CommonResultDTO<?> deductUser(Long targetUserId, BigDecimal amount, Long operatorId);
+    CommonResultDTO<?> deductUser(Long targetUserId, String projectId, String lineId, Long count, Long operatorId);
 
 
     @Scheduled(cron = "0 0 0 * * ?")
@@ -77,10 +77,10 @@ public interface UserService extends IService<User> {
     Boolean updatePassWardByUserName(UserUpdatePasswardDTO updateUserDto);
 
     @Transactional(rollbackFor = Exception.class)
-    void rechargeUserFromAgentBalance(Long targetUserId, BigDecimal amount, Long agentId);
+    void rechargeUserFromAgentBalance(Long targetUserId, String projectId, String lineId, Long count, Long agentId);
 
     @Transactional(rollbackFor = Exception.class)
-    void deductUserToAgentBalance(Long targetUserId, BigDecimal amount, Long agentId);
+    void deductUserToAgentBalance(Long targetUserId, String projectId, String lineId, Long count, Long agentId);
 
 
     @Transactional

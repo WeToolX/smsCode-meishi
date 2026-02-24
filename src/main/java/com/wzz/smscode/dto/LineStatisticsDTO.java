@@ -10,7 +10,7 @@ import java.math.BigDecimal;
 public class LineStatisticsDTO {
 
     private String projectId;
-    private Integer lineId;
+    private String lineId;
     private String projectName;
 
     /**

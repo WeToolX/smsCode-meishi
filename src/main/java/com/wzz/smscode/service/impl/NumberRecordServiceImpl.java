@@ -10,10 +10,8 @@ import com.wzz.smscode.cacheManager.NumberRecordCacheManager;
 import com.wzz.smscode.common.CommonResultDTO;
 import com.wzz.smscode.common.Constants;
 import com.wzz.smscode.dto.*;
-import com.wzz.smscode.dto.CreatDTO.LedgerCreationDTO;
 import com.wzz.smscode.dto.number.NumberDTO;
 import com.wzz.smscode.entity.*;
-import com.wzz.smscode.enums.FundType;
 import com.wzz.smscode.exception.BusinessException;
 import com.wzz.smscode.mapper.NumberRecordMapper;
 import com.wzz.smscode.moduleService.SmsApiService;
@@ -46,11 +44,9 @@ import java.util.stream.Collectors;
 public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, NumberRecord> implements NumberRecordService {
     @Autowired private UserService userService;
     @Autowired private ProjectService projectService;
-    @Autowired private UserLedgerService ledgerService;
     @Autowired @Lazy private NumberRecordService self;
     @Autowired private SystemConfigService systemConfigService;
-    @Autowired private UserLedgerService userLedgerService; // 引入账本服务
-    @Autowired @Lazy private PriceTemplateService priceTemplateService;
+    @Autowired private UserProjectQuotaService userProjectQuotaService;
     @Autowired private SmsApiService smsApiService;
     @Autowired private UserProjectLineService userProjectLineService;
 
@@ -75,7 +71,7 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
      * 恢复中断的任务
      */
     @Async("taskExecutor")
-    @Transactional
+    @Transactional(rollbackFor = Exception.class)
     @Override
     public void recoverInterruptedTask(NumberRecord record) {
         //计算已经消耗的时间
@@ -95,10 +91,13 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
 
 //    @Transactional
     @Override
-    public CommonResultDTO<String> getNumber(String userName, String password, String projectId, Integer lineId) {
-        // 1. 身份验证与余额检查
+    public CommonResultDTO<String> getNumber(String userName, String password, String projectId, String lineId) {
+        // 1. 身份验证与基础校验
         User user = userService.authenticateUserByUserName(userName, password);
         if (user == null) return CommonResultDTO.error(Constants.ERROR_AUTH_FAILED, "用户验证失败");
+        if (!StringUtils.hasText(projectId) || !StringUtils.hasText(lineId)) {
+            return CommonResultDTO.error(Constants.ERROR_SYSTEM_ERROR, "项目ID和线路ID不能为空");
+        }
 
         SystemConfig config = systemConfigService.getConfig();
         if (user.getStatus() != 0) {
@@ -118,35 +117,15 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
             }
         }
 
-        //从模板获取价格
-        Long templateId = user.getTemplateId();
-        if (templateId == null) return CommonResultDTO.error(-5, "用户未配置价格模板");
-
-        PriceTemplateItem priceItem = priceTemplateService.getPriceConfig(templateId, projectId, lineId);
-        if (priceItem == null) {
-            return CommonResultDTO.error(-5, "当前价格模板未配置该项目线路");
-        }
-
-        BigDecimal price = priceItem.getPrice(); // 用户售价
-        BigDecimal costPrice = priceItem.getCostPrice(); // 成本价
-
         Project projectT = projectService.getProject(projectId, lineId);
         if (projectT == null) return CommonResultDTO.error(-5, "总项目表中不存在这个项目和线路！");
         if (!projectT.isStatus()) {
             return CommonResultDTO.error(Constants.ERROR_NO_NUMBER, "该项目没开启！");
         }
-
-        if (user.getBalance().compareTo(price) < 0) {
-            return CommonResultDTO.error(Constants.ERROR_INSUFFICIENT_BALANCE, "余额不足");
+        long availableCount = userProjectQuotaService.getAvailableCount(user.getId(), projectId, lineId);
+        if (availableCount <= 0) {
+            return CommonResultDTO.error(Constants.ERROR_INSUFFICIENT_BALANCE, "当前项目线路配额不足");
         }
-//        boolean hasOngoingRecord = this.hasOngoingRecord(user.getId());
-
-//        if (!BalanceUtil.canGetNumber(user, hasOngoingRecord)) {
-//            return CommonResultDTO.error(Constants.ERROR_INSUFFICIENT_BALANCE, "余额不足或已有进行中的任务");
-//        }
-//        if (hasOngoingRecord) {
-//            return CommonResultDTO.error(Constants.ERROR_INSUFFICIENT_BALANCE, "已有进行中的取号任务");
-//        }
         final int MAX_ATTEMPTS = 3;
         Map<String, String> successfulIdentifier = null;
         boolean numberFoundAndVerified = false;
@@ -203,8 +182,6 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
                     user.getId(),
                     projectId,
                     lineId,
-                    price,
-                    costPrice,
                     successfulIdentifier,
                     projectT.getProjectName()
             );
@@ -221,28 +198,14 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
      */
     @Transactional(rollbackFor = Exception.class)
     @Override
-    public CommonResultDTO<String> createOrderTransaction(Long userId, String projectId, Integer lineId,
-                                                          BigDecimal price, BigDecimal costPrice,
+    public CommonResultDTO<String> createOrderTransaction(Long userId, String projectId, String lineId,
                                                           Map<String, String> successfulIdentifier, String projectName) {
-        // 1. 扣费逻辑 (UserLedgerService 内部也会有事务，会加入到当前事务中)
+        // 1. 构建号码记录
         User user = userService.getById(userId);
-        // 双重检查余额(可选)
-        if (user.getBalance().compareTo(price) < 0) {
-            throw new BusinessException("余额不足");
+        if (user == null) {
+            throw new BusinessException("用户不存在");
         }
-        LedgerCreationDTO deductionDto = LedgerCreationDTO.builder()
-                .userId(userId)
-                .amount(price)
-                .ledgerType(0) // 出账
-                .fundType(FundType.BUSINESS_DEDUCTION)
-                .remark("取号预扣费")
-                .phoneNumber(successfulIdentifier.get("phone"))
-                .lineId(lineId)
-                .projectId(projectId)
-                .build();
-        // 执行扣款
-        BigDecimal newBalance = ledgerService.createLedgerAndUpdateBalance(deductionDto);
-        // 2. 写入号码记录
+
         NumberRecord record = new NumberRecord();
         record.setUserId(userId);
         record.setProjectId(projectId);
@@ -251,14 +214,26 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
         record.setPhoneNumber(successfulIdentifier.get("phone"));
         record.setApiPhoneId(successfulIdentifier.get("id"));
         record.setStatus(0);
-        record.setCharged(1);
-        record.setPrice(price);
-        record.setCostPrice(costPrice);
-        record.setBalanceBefore(user.getBalance());
-        record.setBalanceAfter(newBalance);
+        record.setCharged(0);
         record.setGetNumberTime(LocalDateTime.now());
         record.setProjectName(projectName);
-        this.save(record); // 落库
+        // 落库
+        this.save(record);
+
+        // 2. 按项目线路预扣 1 个配额（先扣费）
+        String preDeductBizNo = "NR_PRE_" + record.getId();
+        userProjectQuotaService.deductQuota(
+                userId,
+                projectId,
+                lineId,
+                1L,
+                preDeductBizNo,
+                userId,
+                "取号预扣配额"
+        );
+        record.setCharged(1);
+        this.updateById(record);
+
         final Long recordId = record.getId();
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
@@ -271,7 +246,7 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
             }
         });
 
-        // 4. 更新用户统计等其他操作
+        // 3. 更新用户统计等其他操作
         userService.updateUserStats(userId);
         return CommonResultDTO.success("取号成功，请稍后查询验证码", successfulIdentifier.get("phone"));
     }
@@ -379,11 +354,11 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
         if (record.getStatus() ==1) {
             return CommonResultDTO.error(Constants.ERROR_NO_CODE,"后台正在取码中，请稍后...");
         }
-        Project project = cacheManager.getProject(projectId, Integer.valueOf(lineId));
+        Project project = cacheManager.getProject(projectId, lineId);
         if (project == null) {
             project = projectService.getProject(record.getProjectId(), record.getLineId());
             if (project != null) {
-                cacheManager.cacheProject(projectId, Integer.valueOf(lineId), project);
+                cacheManager.cacheProject(projectId, lineId, project);
             }
         }
 
@@ -463,40 +438,28 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
         if (isSuccess && StringUtils.hasText(result)) {
             // --- 1. 成功逻辑 ---
             if (latestRecord.getCharged() == 2) {
-                // 已退款但又拿到了码，执行再扣款
-                User user = userService.getById(latestRecord.getUserId());
-                if (user.getBalance().compareTo(latestRecord.getPrice()) < 0) {
-                    throw new BusinessException("获取成功，但账户余额不足以支付，无法查看验证码");
-                }
-                LedgerCreationDTO reDeductDto = LedgerCreationDTO.builder()
-                        .userId(latestRecord.getUserId())
-                        .amount(latestRecord.getPrice())
-                        .ledgerType(0)
-                        .fundType(FundType.BUSINESS_DEDUCTION)
-                        .remark("超时后获码成功，重新扣费")
-                        .phoneNumber(latestRecord.getPhoneNumber())
-                        .lineId(latestRecord.getLineId())
-                        .projectId(latestRecord.getProjectId())
-                        .build();
-                BigDecimal newBalance = ledgerService.createLedgerAndUpdateBalance(reDeductDto);
-                latestRecord.setBalanceAfter(newBalance);
+                // 已退款但又拿到了码，执行再扣配额
+                userProjectQuotaService.deductQuota(
+                        latestRecord.getUserId(),
+                        latestRecord.getProjectId(),
+                        latestRecord.getLineId(),
+                        1L,
+                        "NR_REDEDUCT_" + latestRecord.getId(),
+                        latestRecord.getUserId(),
+                        "超时后获码成功，重新扣减配额"
+                );
                 latestRecord.setCharged(1);
             }
             latestRecord.setCodeReceivedTime(LocalDateTime.now());
             latestRecord.setStatus(2);
             latestRecord.setCode(result);
             latestRecord.setErrorInfo(null);
-
-            this.updateById(latestRecord); // 更新数据库
+            // 更新数据库
+            this.updateById(latestRecord);
             cacheManager.cacheRecord(latestRecord);
             cacheManager.evictUser(latestRecord.getUserName());
 
             userService.updateUserStats(latestRecord.getUserId());
-            try {
-                userService.processRebates(latestRecord);
-            } catch (Exception e) {
-                log.error("代理返款失败，记录ID: {}", latestRecord.getId(), e);
-            }
         } else {
             // --- 2. 失败/超时逻辑 ---
             if (latestRecord.getCharged() == 1) {
@@ -505,21 +468,17 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
                 latestRecord.setCodeReceivedTime(LocalDateTime.now());
                 latestRecord.setCharged(2);
                 latestRecord.setErrorInfo("获取超时，自动退款");
-                LedgerCreationDTO refundDto = LedgerCreationDTO.builder()
-                        .userId(latestRecord.getUserId())
-                        .amount(latestRecord.getPrice())
-                        .ledgerType(1)
-                        .fundType(FundType.ADMIN_OUT_TIME_REBATE)
-                        .remark("取码失败/超时退款")
-                        .phoneNumber(latestRecord.getPhoneNumber())
-                        .lineId(latestRecord.getLineId())
-                        .projectId(latestRecord.getProjectId())
-                        .build();
-
-                BigDecimal balanceAfterRefund = ledgerService.createLedgerAndUpdateBalance(refundDto);
-                latestRecord.setBalanceAfter(balanceAfterRefund);
-
-                this.updateById(latestRecord); // 更新数据库
+                userProjectQuotaService.addQuota(
+                        latestRecord.getUserId(),
+                        latestRecord.getProjectId(),
+                        latestRecord.getLineId(),
+                        1L,
+                        "NR_REFUND_" + latestRecord.getId(),
+                        0L,
+                        "取码失败/超时退回配额"
+                );
+                // 更新数据库
+                this.updateById(latestRecord);
                 cacheManager.cacheRecord(latestRecord);
                 cacheManager.evictUser(latestRecord.getUserName());
                 userService.updateUserStats(latestRecord.getUserId());
@@ -528,7 +487,7 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
 
         // --- 3. 释放手机号逻辑 ---
         final String pId = latestRecord.getProjectId();
-        final Integer lId = latestRecord.getLineId();
+        final String lId = latestRecord.getLineId();
         final String phone = latestRecord.getPhoneNumber();
         final String apiId = latestRecord.getApiPhoneId();
         final boolean isFinalSuccess = (latestRecord.getStatus() == 2);
@@ -773,7 +732,7 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
             wrapper.in("project_id", projectIds);
         }
         if (StringUtils.hasText(queryDTO.getProjectId())) wrapper.eq("project_id", queryDTO.getProjectId());
-        if (queryDTO.getLineId() != null) wrapper.eq("line_id", queryDTO.getLineId());
+        if (StringUtils.hasText(queryDTO.getLineId())) wrapper.eq("line_id", queryDTO.getLineId());
         LocalDateTime startTime = parseAndAdjustDateTime(queryDTO.getStartTime(), false);
         if (startTime != null) wrapper.ge("get_number_time", startTime);
         LocalDateTime endTime = parseAndAdjustDateTime(queryDTO.getEndTime(), true);
@@ -814,16 +773,7 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
             // 过滤无效数据，防止报错或合并到 null 分组
             if (!StringUtils.hasText(projectId)) continue;
 
-            Integer lineId = 0;
-            if (lineIdObj != null) {
-                if (lineIdObj instanceof Number) {
-                    lineId = ((Number) lineIdObj).intValue();
-                } else {
-                    try {
-                        lineId = Integer.parseInt(lineIdObj.toString());
-                    } catch (NumberFormatException ignored) {}
-                }
-            }
+            String lineId = lineIdObj == null ? "0" : lineIdObj.toString();
 
             // 2. 解析统计数值，增加空指针防御
             long totalRequests = getLongFromMap(lineData, "totalRequests");
@@ -859,7 +809,7 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
             LineStatisticsDTO lineDTO = new LineStatisticsDTO();
             lineDTO.setProjectId(projectId);
             lineDTO.setLineId(lineId);
-            lineDTO.setProjectName(projectDTO.getProjectName()); // 冗余一份项目名方便前端
+            lineDTO.setProjectName(projectDTO.getProjectName());
             lineDTO.setTotalRequests(totalRequests);
             lineDTO.setSuccessCount(successCount);
             lineDTO.setSuccessRate(totalRequests > 0 ? (double) successCount * 100.0 / totalRequests : 0.0);
@@ -922,7 +872,7 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
             wrapper.in(NumberRecord::getProjectId, projectIds);
         }
         wrapper.eq(StringUtils.hasText(queryDTO.getProjectId()), NumberRecord::getProjectId, queryDTO.getProjectId());
-        wrapper.eq(queryDTO.getLineId() != null, NumberRecord::getLineId, queryDTO.getLineId());
+        wrapper.eq(StringUtils.hasText(queryDTO.getLineId()), NumberRecord::getLineId, queryDTO.getLineId());
         wrapper.like(StringUtils.hasText(queryDTO.getPhoneNumber()), NumberRecord::getPhoneNumber, queryDTO.getPhoneNumber());
         wrapper.eq(queryDTO.getStatus() != null, NumberRecord::getStatus, queryDTO.getStatus());
         wrapper.eq(queryDTO.getCharged() != null, NumberRecord::getCharged, queryDTO.getCharged());
@@ -945,7 +895,7 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
         if (needUserFilter) {
             // 使用 Lambda 查询用户表
             List<User> users = userService.lambdaQuery()
-                    .select(User::getId) // 只查ID，优化性能
+                    .select(User::getId)
                     .like(StringUtils.hasText(requestDTO.getUserName()), User::getUserName, requestDTO.getUserName())
                     .eq(agentId != null, User::getParentId, agentId)
                     .list();
@@ -1008,7 +958,7 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
             Long uId = Long.valueOf(map.get("user_id").toString());
             dto.setUserId(uId);
             dto.setProjectId((String) map.get("project_id"));
-            dto.setLineId((Integer) map.get("line_id"));
+            dto.setLineId(map.get("line_id") == null ? null : map.get("line_id").toString());
             // 处理 Long/BigDecimal 类型转换 (数据库返回的 Count/Sum 类型可能不同)
             dto.setTotalNumbers(new BigDecimal(map.get("totalNumbers").toString()).longValue());
             dto.setTotalCodes(new BigDecimal(map.get("totalCodes").toString()).longValue());
@@ -1066,19 +1016,16 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
         // 2. 遍历每一条记录进行退款
         for (NumberRecord record : records) {
             try {
-                // A. 执行资金退还 (使用统一的 createLedgerAndUpdateBalance)
-                LedgerCreationDTO refundLedger = LedgerCreationDTO.builder()
-                        .userId(record.getUserId())
-                        .amount(record.getPrice()) // 退还该记录实际扣除的金额
-                        .ledgerType(1) // 1: 入账 (加钱)
-                        .fundType(FundType.ADMIN_OPERATION) // 假设你有 REFUND 枚举，如果没有，用 ADMIN_RECHARGE 或其他
-                        .remark("记录异常批量退款，ID: " + record.getId())
-                        .projectId(record.getProjectId())
-                        .lineId(record.getLineId())
-                        .phoneNumber(record.getPhoneNumber())
-                        .build();
-
-                userLedgerService.createLedgerAndUpdateBalance(refundLedger);
+                // A. 按项目线路退回 1 个配额
+                userProjectQuotaService.addQuota(
+                        record.getUserId(),
+                        record.getProjectId(),
+                        record.getLineId(),
+                        1L,
+                        "NR_BATCH_REFUND_" + record.getId(),
+                        0L,
+                        "管理员批量退款退回配额"
+                );
                 record.setStatus(4);
                 record.setCharged(2);
                 record.setRemark(record.getRemark() + " [管理员批量退款]");
@@ -1161,7 +1108,7 @@ public class NumberRecordServiceImpl extends ServiceImpl<NumberRecordMapper, Num
             return CommonResultDTO.error(Constants.ERROR_SYSTEM_ERROR, "未找到进行中的订单或已处理");
         }
         // 1. 获取项目配置
-        Project project = projectService.getProject(projectId, Integer.valueOf(lineId));
+        Project project = projectService.getProject(projectId, lineId);
         if (project == null) {
             return CommonResultDTO.error(Constants.ERROR_SYSTEM_ERROR,"没有该项目");
         }

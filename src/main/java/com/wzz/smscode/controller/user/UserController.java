@@ -24,7 +24,6 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.client.RestTemplate;
 
-import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
@@ -36,6 +35,7 @@ import java.util.Map;
  * <p>
  * 面向普通用户，提供取号、取码、查询信息等核心功能。
  * 所有接口均需要提供 userId 和 password 进行身份验证。
+ * @author qiexi
  */
 @RestController
 @RequestMapping("/api/user")
@@ -67,7 +67,7 @@ public class UserController {
             @RequestParam String userName,
             @RequestParam String password,
             @RequestParam String projectId,
-             @RequestParam Integer lineId) {
+             @RequestParam String lineId) {
         return numberRecordService.getNumber(userName, password, projectId, lineId);
     }
 
@@ -160,10 +160,12 @@ public class UserController {
      * @return CommonResultDTO，成功时 data 为余额
      */
     @RequestMapping(value = "/getBalance", method = {RequestMethod.GET, RequestMethod.POST})
-    public CommonResultDTO<BigDecimal> getBalance(
+    public CommonResultDTO<Long> getBalance(
             @RequestParam String userName,
-            @RequestParam String password) {
-        return userService.getBalance(userName, password);
+            @RequestParam String password,
+            @RequestParam String projectId,
+            @RequestParam String lineId) {
+        return userService.getBalance(userName, password, projectId, lineId);
     }
 
     /**
@@ -192,10 +194,8 @@ public class UserController {
     @Autowired
     private UserProjectLineService userProjectLineService;
 
-    @Autowired
-    private UserLedgerService userLedgerService;
     /**
-     * 查询当前用户的账本列表
+     * 旧账本接口已下线
      */
     @RequestMapping(value = "/ledger/list", method = {RequestMethod.GET, RequestMethod.POST})
     public CommonResultDTO<?> listLedger(
@@ -203,13 +203,7 @@ public class UserController {
             @RequestParam String password,
             @RequestParam(defaultValue = "1") long page,
             @RequestParam(defaultValue = "10") long size) {
-        Page<UserLedger> pageRequest = new Page<>(page, size);
-        User user = userService.authenticateUserByUserName(userName, password);
-        if (user == null){
-            return CommonResultDTO.error(Constants.ERROR_AUTH_FAILED,"用户名密码错误！");
-        }
-        return CommonResultDTO.success( userLedgerService.listUserLedgerByUSerId(user.getId(),pageRequest));
-
+        return CommonResultDTO.error(Constants.ERROR_SYSTEM_ERROR, "旧金额账本接口已下线，请使用配额流水接口");
     }
 
     /**
@@ -376,47 +370,13 @@ public class UserController {
     }
 
     /**
-     * 清理历史账本记录
-     *
-     * @param userName 用户名
-     * @param password 密码
-     * @param days     保留天数（例如输入1，表示删除1天前的记录。普通用户强制最小为1）
+     * 旧账本清理接口已下线
      */
     @RequestMapping(value = "/ledger/clear", method = {RequestMethod.GET, RequestMethod.POST})
     public CommonResultDTO<String> clearLedger(
             @RequestParam String userName,
             @RequestParam String password) {
-
-        // 1. 身份验证
-        User user = userService.authenticateUserByUserName(userName, password);
-        if (user == null) {
-            return CommonResultDTO.error(Constants.ERROR_AUTH_FAILED, "用户名密码错误！");
-        }
-
-        // 2. 权限与状态校验
-        if (user.getStatus() == 1) {
-            return CommonResultDTO.error(Constants.ERROR_AUTH_FAILED, "该用户已被禁用");
-        }
-        SystemConfig systemConfig = systemConfigService.getConfig();
-
-        Integer days = Integer.valueOf(systemConfig.getUserDeleteDataDay());
-
-
-        if (days == null || days <=0) {
-            return CommonResultDTO.error(Constants.ERROR_SYSTEM_ERROR, "天数参数错误");
-        }
-
-        try {
-            userLedgerService.deleteLedgerByDays(user.getId(), user.getId(), days, false);
-
-            log.info("用户 {} 执行了账本清理操作，保留天数: {}", userName, days);
-            return CommonResultDTO.success("历史记录清理成功", "已清理 " + days + " 天前的记录");
-        } catch (BusinessException e) {
-            return CommonResultDTO.error(Constants.ERROR_SYSTEM_ERROR, e.getMessage());
-        } catch (Exception e) {
-            log.error("清理账本异常: ", e);
-            return CommonResultDTO.error(Constants.ERROR_SYSTEM_ERROR, "系统繁忙，请稍后再试");
-        }
+        return CommonResultDTO.error(Constants.ERROR_SYSTEM_ERROR, "旧金额账本清理接口已下线");
     }
 
     /**
@@ -424,7 +384,6 @@ public class UserController {
      *
      * @param userName 用户名
      * @param password 密码
-     * @param days     保留天数（最小为1）
      */
     @RequestMapping(value = "/number/clear", method = {RequestMethod.GET, RequestMethod.POST})
     public CommonResultDTO<String> clearNumberRecords(

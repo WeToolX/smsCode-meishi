@@ -18,7 +18,7 @@ public interface ProjectService extends IService<Project> {
     @Transactional(rollbackFor = Exception.class) // 确保事务性
     boolean updateProject(Project projectDTO);
 
-    Project getProject(String projectId, Integer lineId);
+    Project getProject(String projectId, String lineId);
 
     List<String> listLines(String projectId);
 
