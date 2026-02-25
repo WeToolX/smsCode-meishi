@@ -1,5 +1,6 @@
 package com.wzz.smscode.controller.user;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.wzz.smscode.common.CommonResultDTO;
@@ -10,9 +11,13 @@ import com.wzz.smscode.dto.EntityDTO.UserDTO;
 import com.wzz.smscode.dto.LoginDTO.UserLoginDto;
 import com.wzz.smscode.dto.ResultDTO.UserResultDTO;
 import com.wzz.smscode.dto.number.NumberDTO;
+import com.wzz.smscode.dto.project.SelectProjectDTO;
+import com.wzz.smscode.dto.quota.UserQuotaItemDTO;
+import com.wzz.smscode.dto.quota.UserQuotaLedgerItemDTO;
 import com.wzz.smscode.dto.update.UserUpdatePasswardDTO;
 import com.wzz.smscode.entity.*;
 import com.wzz.smscode.exception.BusinessException;
+import com.wzz.smscode.mapper.UserProjectQuotaLedgerMapper;
 import com.wzz.smscode.moduleService.PhoneNumberFilterService;
 import com.wzz.smscode.service.*;
 import com.wzz.smscode.service.impl.UserServiceImpl;
@@ -24,10 +29,19 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.client.RestTemplate;
 
+import java.time.LocalDateTime;
 import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 用户接口控制器
@@ -194,6 +208,12 @@ public class UserController {
     @Autowired
     private UserProjectLineService userProjectLineService;
 
+    @Autowired
+    private UserProjectQuotaService userProjectQuotaService;
+
+    @Autowired
+    private UserProjectQuotaLedgerMapper userProjectQuotaLedgerMapper;
+
     /**
      * 旧账本接口已下线
      */
@@ -204,6 +224,84 @@ public class UserController {
             @RequestParam(defaultValue = "1") long page,
             @RequestParam(defaultValue = "10") long size) {
         return CommonResultDTO.error(Constants.ERROR_SYSTEM_ERROR, "旧金额账本接口已下线，请使用配额流水接口");
+    }
+
+    /**
+     * 查询用户项目线路配额列表
+     *
+     * @param userName 用户名
+     * @param password 密码
+     * @param projectId 项目ID（可选）
+     * @param lineId 线路ID（可选）
+     */
+    @RequestMapping(value = "/quotas", method = {RequestMethod.GET, RequestMethod.POST})
+    public CommonResultDTO<List<UserQuotaItemDTO>> listUserQuotas(
+            @RequestParam String userName,
+            @RequestParam String password,
+            @RequestParam(required = false) String projectId,
+            @RequestParam(required = false) String lineId) {
+        try {
+            User user = userService.authenticateUserByUserName(userName, password, false);
+            if (user == null) {
+                return CommonResultDTO.error(Constants.ERROR_AUTH_FAILED, "用户ID或密码错误");
+            }
+            List<UserQuotaItemDTO> data = buildUserQuotaItems(user.getId(), user.getUserName(), projectId, lineId);
+            return CommonResultDTO.success("查询成功", data);
+        } catch (BusinessException e) {
+            return CommonResultDTO.error(Constants.ERROR_SYSTEM_ERROR, e.getMessage());
+        } catch (Exception e) {
+            log.error("用户查询配额列表失败，userName={}", userName, e);
+            return CommonResultDTO.error(Constants.ERROR_SYSTEM_ERROR, "查询配额列表失败");
+        }
+    }
+
+    /**
+     * 查询用户项目线路配额流水
+     *
+     * @param userName 用户名
+     * @param password 密码
+     * @param projectId 项目ID（可选）
+     * @param lineId 线路ID（可选）
+     * @param ledgerType 流水类型（可选，1-入账，0-出账）
+     * @param startTime 开始时间（可选）
+     * @param endTime 结束时间（可选）
+     * @param page 页码
+     * @param size 每页条数
+     */
+    @RequestMapping(value = "/quota-ledgers", method = {RequestMethod.GET, RequestMethod.POST})
+    public CommonResultDTO<Page<UserQuotaLedgerItemDTO>> listUserQuotaLedgers(
+            @RequestParam String userName,
+            @RequestParam String password,
+            @RequestParam(required = false) String projectId,
+            @RequestParam(required = false) String lineId,
+            @RequestParam(required = false) Integer ledgerType,
+            @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime startTime,
+            @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime endTime,
+            @RequestParam(defaultValue = "1") long page,
+            @RequestParam(defaultValue = "10") long size) {
+        try {
+            User user = userService.authenticateUserByUserName(userName, password, false);
+            if (user == null) {
+                return CommonResultDTO.error(Constants.ERROR_AUTH_FAILED, "用户ID或密码错误");
+            }
+            Page<UserQuotaLedgerItemDTO> result = pageUserQuotaLedgers(
+                    user.getId(),
+                    user.getUserName(),
+                    projectId,
+                    lineId,
+                    ledgerType,
+                    startTime,
+                    endTime,
+                    page,
+                    size
+            );
+            return CommonResultDTO.success("查询成功", result);
+        } catch (BusinessException e) {
+            return CommonResultDTO.error(Constants.ERROR_SYSTEM_ERROR, e.getMessage());
+        } catch (Exception e) {
+            log.error("用户查询配额流水失败，userName={}", userName, e);
+            return CommonResultDTO.error(Constants.ERROR_SYSTEM_ERROR, "查询配额流水失败");
+        }
     }
 
     /**
@@ -253,7 +351,8 @@ public class UserController {
         if (user == null) {
             return CommonResultDTO.error(Constants.ERROR_AUTH_FAILED, "用户ID或密码错误");
         }
-        List<UserProjectLine> projects = projectService.listUserProjects(user.getId());
+        // 2. 仅返回当前用户“有剩余配额”的项目，且确保 projectId 字段可用。
+        List<SelectProjectDTO> projects = projectService.listUserProjects(user.getId());
         return CommonResultDTO.success("查询成功", projects);
     }
 
@@ -421,5 +520,178 @@ public class UserController {
             log.error("清理号码记录异常: ", e);
             return CommonResultDTO.error(Constants.ERROR_SYSTEM_ERROR, "系统繁忙");
         }
+    }
+
+    /**
+     * 构建用户配额明细（配额表 + 用户项目线路配置并集）
+     */
+    private List<UserQuotaItemDTO> buildUserQuotaItems(Long userId, String userName, String projectId, String lineId) {
+        LambdaQueryWrapper<UserProjectQuota> quotaQuery = new LambdaQueryWrapper<UserProjectQuota>()
+                .eq(UserProjectQuota::getUserId, userId)
+                .eq(StringUtils.hasText(projectId), UserProjectQuota::getProjectId, projectId)
+                .eq(StringUtils.hasText(lineId), UserProjectQuota::getLineId, lineId);
+        List<UserProjectQuota> quotaList = userProjectQuotaService.list(quotaQuery);
+        Map<String, Long> quotaMap = new HashMap<>();
+        for (UserProjectQuota quota : quotaList) {
+            quotaMap.put(
+                    quota.getProjectId() + "_" + quota.getLineId(),
+                    quota.getAvailableCount() == null ? 0L : quota.getAvailableCount()
+            );
+        }
+
+        Map<String, UserProjectLine> lineMap = new LinkedHashMap<>();
+        List<UserProjectLine> userLines = userProjectLineService.getLinesByUserId(userId);
+        if (userLines != null) {
+            for (UserProjectLine line : userLines) {
+                if (!StringUtils.hasText(line.getProjectId()) || !StringUtils.hasText(line.getLineId())) {
+                    continue;
+                }
+                if (StringUtils.hasText(projectId) && !projectId.equals(line.getProjectId())) {
+                    continue;
+                }
+                if (StringUtils.hasText(lineId) && !lineId.equals(line.getLineId())) {
+                    continue;
+                }
+                lineMap.putIfAbsent(line.getProjectId() + "_" + line.getLineId(), line);
+            }
+        }
+        for (UserProjectQuota quota : quotaList) {
+            String key = quota.getProjectId() + "_" + quota.getLineId();
+            if (!lineMap.containsKey(key)) {
+                UserProjectLine fallback = new UserProjectLine();
+                fallback.setProjectId(quota.getProjectId());
+                fallback.setLineId(quota.getLineId());
+                lineMap.put(key, fallback);
+            }
+        }
+        if (lineMap.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        Set<String> projectIds = lineMap.values().stream()
+                .map(UserProjectLine::getProjectId)
+                .filter(StringUtils::hasText)
+                .collect(Collectors.toSet());
+        Map<String, Project> projectMetaMap = buildProjectMetaMap(projectIds);
+
+        List<UserQuotaItemDTO> result = new ArrayList<>();
+        for (UserProjectLine line : lineMap.values()) {
+            String key = line.getProjectId() + "_" + line.getLineId();
+            UserQuotaItemDTO dto = new UserQuotaItemDTO();
+            dto.setUserId(userId);
+            dto.setUserName(userName);
+            dto.setProjectId(line.getProjectId());
+            dto.setProjectName(line.getProjectName());
+            dto.setLineId(line.getLineId());
+            dto.setAvailableCount(quotaMap.getOrDefault(key, 0L));
+            Project meta = projectMetaMap.get(key);
+            if (meta != null) {
+                if (!StringUtils.hasText(dto.getProjectName())) {
+                    dto.setProjectName(meta.getProjectName());
+                }
+                dto.setLineName(meta.getLineName());
+            }
+            result.add(dto);
+        }
+        result.sort(Comparator.comparing(UserQuotaItemDTO::getProjectId, Comparator.nullsLast(String::compareTo))
+                .thenComparing(UserQuotaItemDTO::getLineId, Comparator.nullsLast(String::compareTo)));
+        return result;
+    }
+
+    /**
+     * 分页查询用户配额流水
+     */
+    private Page<UserQuotaLedgerItemDTO> pageUserQuotaLedgers(
+            Long userId,
+            String userName,
+            String projectId,
+            String lineId,
+            Integer ledgerType,
+            LocalDateTime startTime,
+            LocalDateTime endTime,
+            long page,
+            long size) {
+        LambdaQueryWrapper<UserProjectQuotaLedger> queryWrapper = new LambdaQueryWrapper<UserProjectQuotaLedger>()
+                .eq(UserProjectQuotaLedger::getUserId, userId)
+                .eq(StringUtils.hasText(projectId), UserProjectQuotaLedger::getProjectId, projectId)
+                .eq(StringUtils.hasText(lineId), UserProjectQuotaLedger::getLineId, lineId)
+                .eq(ledgerType != null, UserProjectQuotaLedger::getLedgerType, ledgerType)
+                .ge(startTime != null, UserProjectQuotaLedger::getTimestamp, startTime)
+                .le(endTime != null, UserProjectQuotaLedger::getTimestamp, endTime)
+                .orderByDesc(UserProjectQuotaLedger::getTimestamp);
+
+        Page<UserProjectQuotaLedger> entityPage = new Page<>(page, size);
+        userProjectQuotaLedgerMapper.selectPage(entityPage, queryWrapper);
+
+        Set<String> projectIds = entityPage.getRecords().stream()
+                .map(UserProjectQuotaLedger::getProjectId)
+                .filter(StringUtils::hasText)
+                .collect(Collectors.toSet());
+        Map<String, Project> projectMetaMap = buildProjectMetaMap(projectIds);
+
+        Set<Long> operatorIds = entityPage.getRecords().stream()
+                .map(UserProjectQuotaLedger::getOperatorId)
+                .filter(Objects::nonNull)
+                .filter(id -> id > 0)
+                .collect(Collectors.toSet());
+        Map<Long, String> operatorNameMap = new HashMap<>();
+        if (!operatorIds.isEmpty()) {
+            operatorNameMap = userService.listByIds(operatorIds).stream()
+                    .collect(Collectors.toMap(User::getId, User::getUserName));
+        }
+
+        List<UserQuotaLedgerItemDTO> dtoRecords = new ArrayList<>();
+        for (UserProjectQuotaLedger entity : entityPage.getRecords()) {
+            UserQuotaLedgerItemDTO dto = new UserQuotaLedgerItemDTO();
+            dto.setId(entity.getId());
+            dto.setBizNo(entity.getBizNo());
+            dto.setUserId(entity.getUserId());
+            dto.setUserName(userName);
+            dto.setOperatorId(entity.getOperatorId());
+            dto.setOperatorName(entity.getOperatorId() != null && entity.getOperatorId() == 0L
+                    ? "管理员"
+                    : operatorNameMap.getOrDefault(entity.getOperatorId(), "系统"));
+            dto.setProjectId(entity.getProjectId());
+            dto.setLineId(entity.getLineId());
+            dto.setChangeCount(entity.getChangeCount());
+            dto.setLedgerType(entity.getLedgerType());
+            dto.setCountBefore(entity.getCountBefore());
+            dto.setCountAfter(entity.getCountAfter());
+            dto.setRemark(entity.getRemark());
+            dto.setTimestamp(entity.getTimestamp());
+
+            String key = entity.getProjectId() + "_" + entity.getLineId();
+            Project meta = projectMetaMap.get(key);
+            if (meta != null) {
+                dto.setProjectName(meta.getProjectName());
+                dto.setLineName(meta.getLineName());
+            }
+            dtoRecords.add(dto);
+        }
+
+        Page<UserQuotaLedgerItemDTO> result = new Page<>(page, size);
+        result.setTotal(entityPage.getTotal());
+        result.setRecords(dtoRecords);
+        return result;
+    }
+
+    /**
+     * 构建项目元数据映射
+     */
+    private Map<String, Project> buildProjectMetaMap(Set<String> projectIds) {
+        Map<String, Project> projectMetaMap = new HashMap<>();
+        if (projectIds == null || projectIds.isEmpty()) {
+            return projectMetaMap;
+        }
+        List<Project> projectList = projectService.list(
+                new LambdaQueryWrapper<Project>().in(Project::getProjectId, projectIds)
+        );
+        for (Project project : projectList) {
+            if (!StringUtils.hasText(project.getProjectId()) || !StringUtils.hasText(project.getLineId())) {
+                continue;
+            }
+            projectMetaMap.putIfAbsent(project.getProjectId() + "_" + project.getLineId(), project);
+        }
+        return projectMetaMap;
     }
 }

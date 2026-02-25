@@ -12,7 +12,6 @@ import lombok.Data;
 
 import java.io.Serial;
 import java.io.Serializable;
-import java.math.BigDecimal;
 
 /**
  * 系统配置表实体类
@@ -106,14 +105,6 @@ public class SystemConfig implements Serializable {
     @TableField("min_24h_code_rate")
     @DefaultValue("0.0")
     private Double min24hCodeRate;
-
-    /**
-     * 余额封控下限值
-     */
-    @ColumnComment("余额封控下限值")
-    @TableField("balance_threshold")
-    @DefaultValue("0.00")
-    private BigDecimal balanceThreshold;
 
     /**
      * 系统通知

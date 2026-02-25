@@ -20,7 +20,7 @@ public class CommonResultDTO<T> implements Serializable {
      * -1: 无可用号码
      * -2: 无验证码
      * -3: 用户验证失败
-     * -4: 余额不足
+     * -4: 项目线路配额不足
      * -5: 系统错误
      */
     private Integer status;

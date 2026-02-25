@@ -58,7 +58,6 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     @Autowired private UserMapper userMapper;
     @Autowired private NumberRecordMapper numberRecordMapper;
     @Autowired private UserProjectLineService userProjectLineService;
-    @Autowired @Lazy private PriceTemplateService priceTemplateService;
     @Autowired private UserProjectQuotaService userProjectQuotaService;
 
     @Autowired
@@ -160,9 +159,6 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         User user = findAndLockById(userDTO.getId());
         if (user == null) throw new BusinessException(0, "该用户不存在！");
 
-        Long oldTemplateId = user.getTemplateId();
-        Long newTemplateId = userDTO.getTemplateId();
-
         user.setUserName(userDTO.getUsername());
         if (StringUtils.hasText(userDTO.getPassword())) {
             user.setPassword(userDTO.getPassword());
@@ -173,21 +169,6 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         // 更新黑名单
         if (userDTO.getBlacklistedProjects() != null) {
             user.setProjectBlacklist(String.join(",", userDTO.getBlacklistedProjects()));
-        }
-
-        // 更新模板关联
-        if (newTemplateId != null && !newTemplateId.equals(oldTemplateId)) {
-            // 校验新模板
-            if (priceTemplateService.getById(newTemplateId) == null) {
-                throw new BusinessException("新指定的价格模板不存在");
-            }
-            user.setTemplateId(newTemplateId);
-
-            // 维护模板表中的 userId 列表
-            if (oldTemplateId != null) {
-                priceTemplateService.removeUserFromTemplate(oldTemplateId, user.getId());
-            }
-            priceTemplateService.addUserToTemplate(newTemplateId, user.getId());
         }
 
         cacheManager.evictUser(user.getUserName());
@@ -469,39 +450,6 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
 
         // 2. 执行分页查询
         IPage<User> userPage = this.page(page, wrapper);
-        List<User> records = userPage.getRecords();
-
-        // 3. 填充模板名称 (批量查询优化)
-        if (!CollectionUtils.isEmpty(records)) {
-            // A. 提取所有非空的模板ID
-            Set<Long> templateIds = records.stream()
-                    .map(User::getTemplateId)
-                    .filter(id -> id != null && id != 0L)
-                    .collect(Collectors.toSet());
-
-            // B. 批量查询模板表
-            if (!CollectionUtils.isEmpty(templateIds)) {
-                // 只查询 ID 和 Name 字段，减少数据传输
-                List<PriceTemplate> templates = priceTemplateService.list(
-                        new LambdaQueryWrapper<PriceTemplate>()
-                                .in(PriceTemplate::getId, templateIds)
-                                .select(PriceTemplate::getId, PriceTemplate::getName)
-                );
-
-                // C. 转为 Map<ID, Name>
-                Map<Long, String> templateMap = templates.stream()
-                        .collect(Collectors.toMap(PriceTemplate::getId, PriceTemplate::getName));
-
-                // D. 回填数据
-                for (User user : records) {
-                    Long tid = user.getTemplateId();
-                    if (tid != null && templateMap.containsKey(tid)) {
-                        user.setTemplateName(templateMap.get(tid));
-                    }
-                }
-            }
-        }
-
         return userPage;
     }
 

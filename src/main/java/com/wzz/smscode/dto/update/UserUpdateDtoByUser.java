@@ -29,8 +29,6 @@ public class UserUpdateDtoByUser {
      */
     private Integer status;
 
-    // 变更模板
-    private Long templateId;
     // 变更黑名单
     private List<String> blacklistedProjects;
 }

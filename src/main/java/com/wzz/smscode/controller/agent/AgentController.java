@@ -12,22 +12,28 @@ import com.wzz.smscode.dto.*;
 import com.wzz.smscode.dto.CreatDTO.UserCreateDTO;
 import com.wzz.smscode.dto.LoginDTO.AgentLoginDTO;
 import com.wzz.smscode.dto.agent.AgentDashboardStatsDTO;
+import com.wzz.smscode.dto.agent.AgentMyQuotaDTO;
 import com.wzz.smscode.dto.agent.AgentProjectLineUpdateDTO;
 import com.wzz.smscode.dto.number.NumberDTO;
 import com.wzz.smscode.dto.project.SubUserProjectPriceDTO;
+import com.wzz.smscode.dto.quota.UserQuotaItemDTO;
+import com.wzz.smscode.dto.quota.UserQuotaLedgerItemDTO;
 import com.wzz.smscode.dto.update.UserUpdateDtoByUser;
 import com.wzz.smscode.entity.*;
 import com.wzz.smscode.exception.BusinessException;
+import com.wzz.smscode.mapper.UserProjectQuotaLedgerMapper;
 import com.wzz.smscode.service.*;
 import jakarta.validation.constraints.NotNull;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.context.annotation.Lazy;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.util.StringUtils;
 
+import java.time.LocalDateTime;
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * 代理后台接口控制器
@@ -42,10 +48,12 @@ public class AgentController {
     private static final Logger log = LogManager.getLogger(AgentController.class);
     @Autowired
     private UserService userService;
-
     @Autowired
-    @Lazy
-    private PriceTemplateService priceTemplateService;
+    private UserProjectQuotaService userProjectQuotaService;
+    @Autowired
+    private ProjectService projectService;
+    @Autowired
+    private UserProjectQuotaLedgerMapper userProjectQuotaLedgerMapper;
 
 
 
@@ -241,6 +249,60 @@ public class AgentController {
     }
 
     /**
+     * 代理查看下级用户配额明细
+     */
+    @SaCheckLogin
+    @GetMapping("/user/quotas")
+    public Result<?> getSubUserQuotas(
+            @RequestParam Long targetUserId,
+            @RequestParam(required = false) String projectId,
+            @RequestParam(required = false) String lineId) {
+        try {
+            Long agentId = StpUtil.getLoginIdAsLong();
+            checkAgentPermission(agentId);
+            User targetUser = validateSubordinateUser(agentId, targetUserId);
+            List<UserQuotaItemDTO> list = buildUserQuotaItems(targetUser.getId(), targetUser.getUserName(), projectId, lineId);
+            return Result.success("查询成功", list);
+        } catch (BusinessException e) {
+            return Result.error(e.getMessage());
+        } catch (Exception e) {
+            log.error("代理查询下级用户配额失败，targetUserId={}", targetUserId, e);
+            return Result.error("查询用户配额失败");
+        }
+    }
+
+    /**
+     * 代理查看下级用户配额流水（可按项目+线路筛选）
+     */
+    @SaCheckLogin
+    @GetMapping("/user/quota-ledgers")
+    public Result<?> getSubUserQuotaLedgers(
+            @RequestParam Long targetUserId,
+            @RequestParam(required = false) String projectId,
+            @RequestParam(required = false) String lineId,
+            @RequestParam(required = false) Integer ledgerType,
+            @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime startTime,
+            @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime endTime,
+            @RequestParam(defaultValue = "1") long page,
+            @RequestParam(defaultValue = "10") long size) {
+        try {
+            Long agentId = StpUtil.getLoginIdAsLong();
+            checkAgentPermission(agentId);
+            User targetUser = validateSubordinateUser(agentId, targetUserId);
+            Page<UserQuotaLedgerItemDTO> result = pageUserQuotaLedgers(
+                    targetUser.getId(), targetUser.getUserName(),
+                    projectId, lineId, ledgerType, startTime, endTime, page, size
+            );
+            return Result.success("查询成功", result);
+        } catch (BusinessException e) {
+            return Result.error(e.getMessage());
+        } catch (Exception e) {
+            log.error("代理查询下级用户配额流水失败，targetUserId={}", targetUserId, e);
+            return Result.error("查询用户配额流水失败");
+        }
+    }
+
+    /**
      * 查询当前代理登录用户的所有下级的资金流水表（分页）
      *
      * @param targetUserId (可选) 指定下级用户ID，用于筛选特定用户的流水
@@ -370,6 +432,117 @@ public class AgentController {
     private UserProjectLineService userProjectLineService;
 
     /**
+     * 查询代理本人在各项目线路下的剩余配额
+     */
+    @SaCheckLogin
+    @GetMapping("/my/quotas")
+    public Result<?> getMyQuotas(
+            @RequestParam(required = false) String projectId,
+            @RequestParam(required = false) String lineId) {
+        try {
+            Long agentId = StpUtil.getLoginIdAsLong();
+
+            // 1. 查询代理本人已存在的配额记录，作为主数据源（必须覆盖“仅有配额但无配置”的场景）
+            LambdaQueryWrapper<UserProjectQuota> quotaQuery = new LambdaQueryWrapper<UserProjectQuota>()
+                    .eq(UserProjectQuota::getUserId, agentId)
+                    .eq(StringUtils.hasText(projectId), UserProjectQuota::getProjectId, projectId)
+                    .eq(StringUtils.hasText(lineId), UserProjectQuota::getLineId, lineId);
+            List<UserProjectQuota> quotaList = userProjectQuotaService.list(quotaQuery);
+            Map<String, Long> quotaMap = new HashMap<>();
+            for (UserProjectQuota quota : quotaList) {
+                String key = quota.getProjectId() + "_" + quota.getLineId();
+                quotaMap.put(key, quota.getAvailableCount() == null ? 0L : quota.getAvailableCount());
+            }
+
+            // 2. 获取代理的项目线路配置，并与配额记录做并集，确保“有配额必可见”
+            Map<String, UserProjectLine> lineMap = new LinkedHashMap<>();
+            List<UserProjectLine> myLines = userProjectLineService.getLinesByUserId(agentId);
+            if (myLines != null) {
+                for (UserProjectLine line : myLines) {
+                    if (!StringUtils.hasText(line.getProjectId()) || !StringUtils.hasText(line.getLineId())) {
+                        continue;
+                    }
+                    if (StringUtils.hasText(projectId) && !projectId.equals(line.getProjectId())) {
+                        continue;
+                    }
+                    if (StringUtils.hasText(lineId) && !lineId.equals(line.getLineId())) {
+                        continue;
+                    }
+                    lineMap.putIfAbsent(line.getProjectId() + "_" + line.getLineId(), line);
+                }
+            }
+            for (UserProjectQuota quota : quotaList) {
+                String pid = quota.getProjectId();
+                String lid = quota.getLineId();
+                if (!StringUtils.hasText(pid) || !StringUtils.hasText(lid)) {
+                    continue;
+                }
+                String key = pid + "_" + lid;
+                if (!lineMap.containsKey(key)) {
+                    UserProjectLine fallback = new UserProjectLine();
+                    fallback.setProjectId(pid);
+                    fallback.setLineId(lid);
+                    lineMap.put(key, fallback);
+                }
+            }
+
+            if (lineMap.isEmpty()) {
+                return Result.success("查询成功", Collections.emptyList());
+            }
+
+            // 3. 查询线路名称（lineName），用于前端展示
+            Set<String> projectIds = lineMap.values().stream()
+                    .map(UserProjectLine::getProjectId)
+                    .filter(StringUtils::hasText)
+                    .collect(Collectors.toSet());
+            Map<String, Project> projectMetaMap = new HashMap<>();
+            if (!projectIds.isEmpty()) {
+                List<Project> projectList = projectService.list(
+                        new LambdaQueryWrapper<Project>()
+                                .in(Project::getProjectId, projectIds)
+                );
+                for (Project project : projectList) {
+                    if (!StringUtils.hasText(project.getProjectId()) || !StringUtils.hasText(project.getLineId())) {
+                        continue;
+                    }
+                    String key = project.getProjectId() + "_" + project.getLineId();
+                    projectMetaMap.putIfAbsent(key, project);
+                }
+            }
+
+            // 4. 组装返回数据：没有配额记录的线路默认0
+            List<AgentMyQuotaDTO> result = new ArrayList<>();
+            for (UserProjectLine line : lineMap.values()) {
+                String key = line.getProjectId() + "_" + line.getLineId();
+                AgentMyQuotaDTO dto = new AgentMyQuotaDTO();
+                dto.setProjectId(line.getProjectId());
+                dto.setProjectName(line.getProjectName());
+                dto.setLineId(line.getLineId());
+                dto.setAvailableCount(quotaMap.getOrDefault(key, 0L));
+
+                Project meta = projectMetaMap.get(key);
+                if (meta != null) {
+                    if (!StringUtils.hasText(dto.getProjectName())) {
+                        dto.setProjectName(meta.getProjectName());
+                    }
+                    dto.setLineName(meta.getLineName());
+                }
+                result.add(dto);
+            }
+            result.sort(Comparator
+                    .comparing(AgentMyQuotaDTO::getProjectId, Comparator.nullsLast(String::compareTo))
+                    .thenComparing(AgentMyQuotaDTO::getLineId, Comparator.nullsLast(String::compareTo)));
+
+            return Result.success("查询成功", result);
+        } catch (BusinessException e) {
+            return Result.error(e.getMessage());
+        } catch (Exception e) {
+            log.error("查询代理本人配额失败", e);
+            return Result.error("查询配额失败");
+        }
+    }
+
+    /**
      * 查询当前登录代理自己的项目价格
      */
     @GetMapping("/project/price")
@@ -425,87 +598,6 @@ public class AgentController {
             return Result.error(Constants.ERROR_SYSTEM_ERROR, e.getMessage());
         }
     }
-
-
-    /**
-     * [代理] 创建自己的价格模板
-     * @param createDTO 模板信息
-     * @return 操作结果
-     */
-    @SaCheckLogin
-    @PostMapping("/price-templates/add")
-    public Result<?> createAgentPriceTemplate(@RequestBody PriceTemplateCreateDTO createDTO) {
-        long agentId = StpUtil.getLoginIdAsLong();
-        try {
-            boolean success = priceTemplateService.saveOrUpdateTemplate(createDTO, agentId);
-            return success ? Result.success("创建成功") : Result.error("创建失败");
-        } catch (BusinessException e) {
-            return Result.error(e.getMessage());
-        } catch (Exception e) {
-            log.error("代理 [{}] 创建价格模板失败", agentId, e);
-            return Result.error(Constants.ERROR_SYSTEM_ERROR, "系统错误，创建失败");
-        }
-    }
-
-    /**
-     * [代理] 获取自己创建的所有价格模板
-     * @return 模板列表
-     */
-    @SaCheckLogin
-    @GetMapping("/price-templates/get")
-    public Result<List<PriceTemplateResponseDTO>> getAgentPriceTemplates() {
-        long agentId = StpUtil.getLoginIdAsLong();
-        try {
-            List<PriceTemplateResponseDTO> templates = priceTemplateService.listTemplatesByCreator(agentId);
-            return Result.success("查询成功", templates);
-        } catch (Exception e) {
-            log.error("代理 [{}] 查询价格模板失败", agentId, e);
-            return Result.error(Constants.ERROR_SYSTEM_ERROR, "系统错误，查询失败");
-        }
-    }
-
-    /**
-     * [代理] 更新自己的价格模板
-     * @param templateId 模板ID
-     * @param updateDTO 更新后的模板信息
-     * @return 操作结果
-     */
-    @SaCheckLogin
-    @PostMapping("/price-templates/update/{templateId}") // 建议使用 PUT
-    public Result<?> updateAgentPriceTemplate(@PathVariable Long templateId, @RequestBody PriceTemplateCreateDTO updateDTO) {
-        long agentId = StpUtil.getLoginIdAsLong();
-        try {
-            boolean success = priceTemplateService.updateTemplate(templateId, updateDTO, agentId);
-            return success ? Result.success("更新成功") : Result.error("更新失败");
-        } catch (BusinessException e) {
-            return Result.error(e.getMessage());
-        } catch (Exception e) {
-            log.error("代理 [{}] 更新价格模板失败", agentId, e);
-            return Result.error(Constants.ERROR_SYSTEM_ERROR, "系统错误，更新失败");
-        }
-    }
-
-    /**
-     * [代理] 删除自己的价格模板
-     * @param templateId 模板ID
-     * @return 操作结果
-     */
-    @SaCheckLogin
-    @GetMapping("/price-templates/delete/{templateId}") // 建议使用 DELETE
-    public Result<?> deleteAgentPriceTemplate(@PathVariable Long templateId) {
-        long agentId = StpUtil.getLoginIdAsLong();
-        try {
-            boolean success = priceTemplateService.deleteTemplate(templateId, agentId);
-            return success ? Result.success("删除成功") : Result.error("删除失败");
-        } catch (BusinessException e) {
-            return Result.error(e.getMessage());
-        } catch (Exception e) {
-            log.error("代理 [{}] 删除价格模板失败", agentId, e);
-            return Result.error(Constants.ERROR_SYSTEM_ERROR, "系统错误，删除失败");
-        }
-    }
-
-
     /**
      * 查询代理总利润
      */
@@ -585,27 +677,8 @@ public class AgentController {
         }
     }
     /**
-     * 获取所有可用模板 (用于创建用户时的下拉框)
-     */
-    @GetMapping("/template/list")
-    public Result<?> listTemplates() {
-        try{
-            StpUtil.checkLogin();
-            long operatorId = StpUtil.getLoginIdAsLong();
-            // 管理员看所有，代理看自己创建的
-            LambdaQueryWrapper<PriceTemplate> wrapper = new LambdaQueryWrapper<>();
-            if (operatorId != 0L) {
-                wrapper.eq(PriceTemplate::getCreatId, operatorId);
-            }
-            return Result.success(priceTemplateService.list(wrapper));
-        }catch (BusinessException e){
-            return Result.error(e.getMessage());
-        }
-    }
-
-    /**
      * 获取用户的配置信息
-     * 返回：关联的模板ID (templateId) 和 项目黑名单 (blacklist)
+     * 返回：项目黑名单 (blacklist)
      *
      * @param userId 用户ID
      * @return Map包含配置信息
@@ -618,51 +691,12 @@ public class AgentController {
                 return Result.error("用户不存在");
             }
             Map<String, Object> result = new HashMap<>();
-            result.put("templateId", user.getTemplateId());
             result.put("blacklist", user.getProjectBlacklist());
-            if (user.getTemplateId() != null) {
-                PriceTemplate template = priceTemplateService.getById(user.getTemplateId());
-                if (template != null) {
-                    result.put("templateName", template.getName());
-                }
-            }
             return Result.success("查询成功", result);
         } catch (Exception e) {
             log.error("获取用户配置信息失败: userId={}", userId, e);
             return Result.error("系统错误，获取配置失败");
         }
-    }
-
-    /**
-     * 获取指定价格模板的详细配置项
-     * @param templateId 模板ID
-     */
-    @GetMapping("/price-templates/{templateId}/items")
-    public Result<List<PriceTemplateItem>> getTemplateItems(@PathVariable Long templateId) {
-        try {
-            List<PriceTemplateItem> items = priceTemplateService.getTemplateItems(templateId);
-            return Result.success(items);
-        } catch (Exception e) {
-            log.error("获取模板详情失败", e);
-            return Result.error("获取模板详情失败");
-        }
-    }
-
-    /**
-     * 获取代理自己的项目价格配置模板
-     */
-    @GetMapping("/price-templates/my")
-    public Result<?> getMyTemplates() {
-        try{
-            StpUtil.checkLogin();
-            Long operatorId = StpUtil.getLoginIdAsLong();
-            User user = userService.getById(operatorId);
-            List<PriceTemplateItem> items = priceTemplateService.getTemplateItems(user.getTemplateId());
-            return Result.success(items);
-        }catch (BusinessException e){
-            return Result.error(e.getMessage());
-        }
-
     }
 
     /**
@@ -694,6 +728,190 @@ public class AgentController {
             log.error("代理清理号码记录异常: ", e);
             return Result.error("系统繁忙");
         }
+    }
+
+    /**
+     * 校验目标用户是否为当前代理的直属下级
+     */
+    private User validateSubordinateUser(Long agentId, Long targetUserId) {
+        if (targetUserId == null || targetUserId <= 0) {
+            throw new BusinessException("目标用户参数非法");
+        }
+        User targetUser = userService.getById(targetUserId);
+        if (targetUser == null) {
+            throw new BusinessException("目标用户不存在");
+        }
+        if (!agentId.equals(targetUser.getParentId())) {
+            throw new BusinessException("无权查看非下级用户配额");
+        }
+        return targetUser;
+    }
+
+    /**
+     * 构建用户配额明细（配额表 + 用户项目线路配置并集）
+     */
+    private List<UserQuotaItemDTO> buildUserQuotaItems(Long userId, String userName, String projectId, String lineId) {
+        LambdaQueryWrapper<UserProjectQuota> quotaQuery = new LambdaQueryWrapper<UserProjectQuota>()
+                .eq(UserProjectQuota::getUserId, userId)
+                .eq(StringUtils.hasText(projectId), UserProjectQuota::getProjectId, projectId)
+                .eq(StringUtils.hasText(lineId), UserProjectQuota::getLineId, lineId);
+        List<UserProjectQuota> quotaList = userProjectQuotaService.list(quotaQuery);
+        Map<String, Long> quotaMap = new HashMap<>();
+        for (UserProjectQuota quota : quotaList) {
+            quotaMap.put(quota.getProjectId() + "_" + quota.getLineId(),
+                    quota.getAvailableCount() == null ? 0L : quota.getAvailableCount());
+        }
+
+        Map<String, UserProjectLine> lineMap = new LinkedHashMap<>();
+        List<UserProjectLine> userLines = userProjectLineService.getLinesByUserId(userId);
+        if (userLines != null) {
+            for (UserProjectLine line : userLines) {
+                if (!StringUtils.hasText(line.getProjectId()) || !StringUtils.hasText(line.getLineId())) {
+                    continue;
+                }
+                if (StringUtils.hasText(projectId) && !projectId.equals(line.getProjectId())) {
+                    continue;
+                }
+                if (StringUtils.hasText(lineId) && !lineId.equals(line.getLineId())) {
+                    continue;
+                }
+                lineMap.putIfAbsent(line.getProjectId() + "_" + line.getLineId(), line);
+            }
+        }
+        for (UserProjectQuota quota : quotaList) {
+            String key = quota.getProjectId() + "_" + quota.getLineId();
+            if (!lineMap.containsKey(key)) {
+                UserProjectLine fallback = new UserProjectLine();
+                fallback.setProjectId(quota.getProjectId());
+                fallback.setLineId(quota.getLineId());
+                lineMap.put(key, fallback);
+            }
+        }
+
+        if (lineMap.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        Set<String> projectIds = lineMap.values().stream()
+                .map(UserProjectLine::getProjectId)
+                .filter(StringUtils::hasText)
+                .collect(Collectors.toSet());
+        Map<String, Project> projectMetaMap = buildProjectMetaMap(projectIds);
+
+        List<UserQuotaItemDTO> result = new ArrayList<>();
+        for (UserProjectLine line : lineMap.values()) {
+            String key = line.getProjectId() + "_" + line.getLineId();
+            UserQuotaItemDTO dto = new UserQuotaItemDTO();
+            dto.setUserId(userId);
+            dto.setUserName(userName);
+            dto.setProjectId(line.getProjectId());
+            dto.setProjectName(line.getProjectName());
+            dto.setLineId(line.getLineId());
+            dto.setAvailableCount(quotaMap.getOrDefault(key, 0L));
+            Project meta = projectMetaMap.get(key);
+            if (meta != null) {
+                if (!StringUtils.hasText(dto.getProjectName())) {
+                    dto.setProjectName(meta.getProjectName());
+                }
+                dto.setLineName(meta.getLineName());
+            }
+            result.add(dto);
+        }
+        result.sort(Comparator.comparing(UserQuotaItemDTO::getProjectId, Comparator.nullsLast(String::compareTo))
+                .thenComparing(UserQuotaItemDTO::getLineId, Comparator.nullsLast(String::compareTo)));
+        return result;
+    }
+
+    /**
+     * 分页查询用户配额流水
+     */
+    private Page<UserQuotaLedgerItemDTO> pageUserQuotaLedgers(
+            Long userId, String userName,
+            String projectId, String lineId, Integer ledgerType,
+            LocalDateTime startTime, LocalDateTime endTime,
+            long page, long size) {
+        LambdaQueryWrapper<UserProjectQuotaLedger> queryWrapper = new LambdaQueryWrapper<UserProjectQuotaLedger>()
+                .eq(UserProjectQuotaLedger::getUserId, userId)
+                .eq(StringUtils.hasText(projectId), UserProjectQuotaLedger::getProjectId, projectId)
+                .eq(StringUtils.hasText(lineId), UserProjectQuotaLedger::getLineId, lineId)
+                .eq(ledgerType != null, UserProjectQuotaLedger::getLedgerType, ledgerType)
+                .ge(startTime != null, UserProjectQuotaLedger::getTimestamp, startTime)
+                .le(endTime != null, UserProjectQuotaLedger::getTimestamp, endTime)
+                .orderByDesc(UserProjectQuotaLedger::getTimestamp);
+
+        Page<UserProjectQuotaLedger> entityPage = new Page<>(page, size);
+        userProjectQuotaLedgerMapper.selectPage(entityPage, queryWrapper);
+
+        Set<String> projectIds = entityPage.getRecords().stream()
+                .map(UserProjectQuotaLedger::getProjectId)
+                .filter(StringUtils::hasText)
+                .collect(Collectors.toSet());
+        Map<String, Project> projectMetaMap = buildProjectMetaMap(projectIds);
+
+        Set<Long> operatorIds = entityPage.getRecords().stream()
+                .map(UserProjectQuotaLedger::getOperatorId)
+                .filter(Objects::nonNull)
+                .filter(id -> id > 0)
+                .collect(Collectors.toSet());
+        Map<Long, String> operatorNameMap = new HashMap<>();
+        if (!operatorIds.isEmpty()) {
+            operatorNameMap = userService.listByIds(operatorIds).stream()
+                    .collect(Collectors.toMap(User::getId, User::getUserName));
+        }
+
+        List<UserQuotaLedgerItemDTO> dtoRecords = new ArrayList<>();
+        for (UserProjectQuotaLedger entity : entityPage.getRecords()) {
+            UserQuotaLedgerItemDTO dto = new UserQuotaLedgerItemDTO();
+            dto.setId(entity.getId());
+            dto.setBizNo(entity.getBizNo());
+            dto.setUserId(entity.getUserId());
+            dto.setUserName(userName);
+            dto.setOperatorId(entity.getOperatorId());
+            dto.setOperatorName(entity.getOperatorId() != null && entity.getOperatorId() == 0L
+                    ? "管理员"
+                    : operatorNameMap.getOrDefault(entity.getOperatorId(), "未知"));
+            dto.setProjectId(entity.getProjectId());
+            dto.setLineId(entity.getLineId());
+            dto.setChangeCount(entity.getChangeCount());
+            dto.setLedgerType(entity.getLedgerType());
+            dto.setCountBefore(entity.getCountBefore());
+            dto.setCountAfter(entity.getCountAfter());
+            dto.setRemark(entity.getRemark());
+            dto.setTimestamp(entity.getTimestamp());
+
+            String key = entity.getProjectId() + "_" + entity.getLineId();
+            Project meta = projectMetaMap.get(key);
+            if (meta != null) {
+                dto.setProjectName(meta.getProjectName());
+                dto.setLineName(meta.getLineName());
+            }
+            dtoRecords.add(dto);
+        }
+
+        Page<UserQuotaLedgerItemDTO> result = new Page<>(page, size);
+        result.setTotal(entityPage.getTotal());
+        result.setRecords(dtoRecords);
+        return result;
+    }
+
+    /**
+     * 构建项目元数据映射
+     */
+    private Map<String, Project> buildProjectMetaMap(Set<String> projectIds) {
+        Map<String, Project> projectMetaMap = new HashMap<>();
+        if (projectIds == null || projectIds.isEmpty()) {
+            return projectMetaMap;
+        }
+        List<Project> projectList = projectService.list(
+                new LambdaQueryWrapper<Project>().in(Project::getProjectId, projectIds)
+        );
+        for (Project project : projectList) {
+            if (!StringUtils.hasText(project.getProjectId()) || !StringUtils.hasText(project.getLineId())) {
+                continue;
+            }
+            projectMetaMap.putIfAbsent(project.getProjectId() + "_" + project.getLineId(), project);
+        }
+        return projectMetaMap;
     }
 
 }

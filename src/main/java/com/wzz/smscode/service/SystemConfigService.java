@@ -5,8 +5,6 @@ import com.wzz.smscode.entity.SystemConfig;
 import com.wzz.smscode.entity.User;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.math.BigDecimal;
-
 public interface SystemConfigService extends IService<SystemConfig> {
     SystemConfig getConfig();
 
@@ -16,8 +14,6 @@ public interface SystemConfigService extends IService<SystemConfig> {
     boolean isBanModeEnabled();
 
     Double getMinCodeRateLimit();
-
-    BigDecimal getBalanceThreshold();
 
     void checkAndBanUser(User user);
 }

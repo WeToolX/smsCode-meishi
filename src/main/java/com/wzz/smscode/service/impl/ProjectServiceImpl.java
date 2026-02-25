@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.wzz.smscode.cacheManager.NumberRecordCacheManager;
 import com.wzz.smscode.dto.project.ProjectPriceDetailsDTO;
 import com.wzz.smscode.dto.project.ProjectPriceSummaryDTO;
+import com.wzz.smscode.dto.project.SelectProjectDTO;
 import com.wzz.smscode.entity.*;
 import com.wzz.smscode.exception.BusinessException;
 import com.wzz.smscode.mapper.ProjectMapper;
@@ -31,18 +32,6 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
     @Autowired
     @Lazy
     private UserService userService;
-
-    @Autowired
-    private UserProjectLineService userProjectLineService;
-
-    // 【新增注入】用于操作模板和模板项
-    @Autowired
-    @Lazy
-    private PriceTemplateService priceTemplateService;
-
-    @Autowired
-    @Lazy
-    private PriceTemplateItemService priceTemplateItemService;
 
     @Autowired
     private UserProjectQuotaService userProjectQuotaService;
@@ -73,28 +62,6 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
         cacheManager.evictProject(oldProjectId, oldLineId);
         cacheManager.evictProject(projectDTO.getProjectId(), projectDTO.getLineId());
         log.info("项目基础信息已更新并清理缓存, ID: {}", projectDTO.getId());
-        log.info("开始同步更新关联的价格模板项配置...");
-        LambdaUpdateWrapper<PriceTemplateItem> updateWrapper = new LambdaUpdateWrapper<>();
-        updateWrapper.eq(PriceTemplateItem::getProjectTableId, existingProject.getId());
-        try {
-            if (projectDTO.getProjectId() != null) {
-                updateWrapper.set(PriceTemplateItem::getProjectId, Long.valueOf(projectDTO.getProjectId()));
-            }
-            if (projectDTO.getLineId() != null) {
-                updateWrapper.set(PriceTemplateItem::getLineId, Long.valueOf(projectDTO.getLineId()));
-            }
-        } catch (NumberFormatException e) {
-            log.error("项目ID或线路ID格式转换错误，无法同步模板", e);
-        }
-
-        updateWrapper.set(PriceTemplateItem::getProjectName, projectDTO.getProjectName());
-        updateWrapper.set(PriceTemplateItem::getCostPrice, projectDTO.getCostPrice());
-        updateWrapper.set(PriceTemplateItem::getMinPrice, projectDTO.getPriceMin());
-        updateWrapper.set(PriceTemplateItem::getMaxPrice, projectDTO.getPriceMax());
-
-        boolean itemsUpdated = priceTemplateItemService.update(updateWrapper);
-        log.info("关联的价格模板项同步完成: {}, Project ID: {}", itemsUpdated, projectDTO.getId());
-
         return true;
     }
 
@@ -221,7 +188,7 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
 
     /**
      * 重写 save 方法
-     * 【修改】: 在创建新项目后，不再为用户直接生成线路，而是同步更新到所有已有的“价格模板”中。
+     * 新计费模式下仅保存项目本身，不再同步价格模板相关数据。
      */
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -236,57 +203,12 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
             return false;
         }
         log.info("项目 '{}' 已成功保存，ID为: {}", project.getProjectName(), project.getId());
-
-        List<PriceTemplate> allTemplates = priceTemplateService.list();
-        if (CollectionUtils.isEmpty(allTemplates)) {
-            log.warn("项目 '{}' 创建成功，但系统中没有找到任何价格模板，无需同步。", project.getProjectName());
-            return true;
-        }
-        List<PriceTemplateItem> itemsToInsert = new ArrayList<>();
-
-        BigDecimal initialPrice = project.getPriceMax() != null && project.getPriceMax().compareTo(BigDecimal.ZERO) > 0
-                ? project.getPriceMax()
-                : project.getCostPrice();
-
-        for (PriceTemplate template : allTemplates) {
-            PriceTemplateItem item = new PriceTemplateItem();
-            item.setTemplateId(template.getId());
-            item.setProjectTableId(project.getId()); // 关联项目主键ID
-
-            try {
-                item.setProjectId(Long.valueOf(project.getProjectId()));
-                item.setLineId(Long.valueOf(project.getLineId()));
-            } catch (NumberFormatException e) {
-                log.error("项目ID或线路ID非数字，跳过该项模板同步: {}", project.getProjectName());
-                continue;
-            }
-
-            item.setProjectName(project.getProjectName());
-
-            // 设置价格相关
-            item.setCostPrice(project.getCostPrice());
-            item.setPrice(initialPrice); // 模板项的默认售价
-            item.setMinPrice(project.getPriceMin());
-            item.setMaxPrice(project.getPriceMax());
-
-            itemsToInsert.add(item);
-        }
-
-        // 4. 批量保存模板项
-        if (!itemsToInsert.isEmpty()) {
-            log.info("准备为 {} 个模板批量插入项目 '{}' 的配置项...", itemsToInsert.size(), project.getProjectName());
-            boolean itemsSaved = priceTemplateItemService.saveBatch(itemsToInsert);
-            if (!itemsSaved) {
-                throw new BusinessException("为模板批量创建项目配置失败，操作已回滚。");
-            }
-        }
-
         return true;
     }
 
     /**
      * 重写 deleteByID 方法
-     * 【修改】: 删除项目时，同步删除关联的“价格模板项”，不再删除用户线路配置(UserProjectLine)。
+     * 新计费模式下仅删除项目本身。
      */
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -297,17 +219,7 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
             throw new BusinessException("删除失败：找不到ID为 " + id + " 的项目。");
         }
 
-        // 1. 【修改】删除所有模板中关联该项目的配置项
-        log.info("正在删除项目 '{}' (ID: {})，将同步删除所有关联的价格模板项...", projectToDelete.getProjectName(), id);
-
-        LambdaQueryWrapper<PriceTemplateItem> deleteWrapper = new LambdaQueryWrapper<>();
-        deleteWrapper.eq(PriceTemplateItem::getProjectTableId, id);
-
-        // 执行删除模板项
-        priceTemplateItemService.remove(deleteWrapper);
-        log.info("项目 '{}' 关联的模板项配置已清理完毕。", projectToDelete.getProjectName());
-
-        // 2. 删除项目本身
+        // 删除项目本身
         boolean projectRemoved = this.removeById(id);
         if (!projectRemoved) {
             throw new BusinessException("删除项目主体记录失败，操作已回滚。");
@@ -318,7 +230,60 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
     }
 
     @Override
-    public List<UserProjectLine> listUserProjects(Long userId) {
-        return userProjectLineService.getLinesByUserId(userId);
+    public List<SelectProjectDTO> listUserProjects(Long userId) {
+        // 1. 参数防御：用户ID为空时直接返回空列表，避免无效数据库查询。
+        if (userId == null) {
+            return Collections.emptyList();
+        }
+
+        // 2. 只读取“有可用配额”的项目，严格符合“无配额无权限”的规则。
+        List<UserProjectQuota> quotaList = userProjectQuotaService.list(
+                new LambdaQueryWrapper<UserProjectQuota>()
+                        .eq(UserProjectQuota::getUserId, userId)
+                        .gt(UserProjectQuota::getAvailableCount, 0)
+                        .select(UserProjectQuota::getProjectId)
+        );
+        if (CollectionUtils.isEmpty(quotaList)) {
+            return Collections.emptyList();
+        }
+
+        // 3. 从配额记录中提取项目ID并去重。
+        List<String> projectIds = quotaList.stream()
+                .map(UserProjectQuota::getProjectId)
+                .filter(StringUtils::hasText)
+                .distinct()
+                .sorted()
+                .collect(Collectors.toList());
+        if (CollectionUtils.isEmpty(projectIds)) {
+            return Collections.emptyList();
+        }
+
+        // 4. 查询项目元数据。仅以项目ID聚合，避免返回重复项目。
+        List<Project> projectList = this.list(
+                new LambdaQueryWrapper<Project>()
+                        .in(Project::getProjectId, projectIds)
+                        .eq(Project::isStatus, true)
+                        .select(Project::getProjectId, Project::getProjectName)
+        );
+        Map<String, String> projectNameMap = new HashMap<>();
+        for (Project project : projectList) {
+            if (!StringUtils.hasText(project.getProjectId())) {
+                continue;
+            }
+            // 同一项目ID可能存在多条线路，优先保留第一条非空项目名。
+            if (StringUtils.hasText(project.getProjectName()) && !projectNameMap.containsKey(project.getProjectId())) {
+                projectNameMap.put(project.getProjectId(), project.getProjectName());
+            }
+        }
+
+        // 5. 组装返回结构：projectId 一定返回；若项目名缺失，回退为空字符串。
+        List<SelectProjectDTO> result = new ArrayList<>();
+        for (String projectId : projectIds) {
+            SelectProjectDTO item = new SelectProjectDTO();
+            item.setProjectId(projectId);
+            item.setProjectName(projectNameMap.getOrDefault(projectId, ""));
+            result.add(item);
+        }
+        return result;
     }
 }

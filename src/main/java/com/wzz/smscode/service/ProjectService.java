@@ -1,11 +1,10 @@
 package com.wzz.smscode.service;
 
 import com.baomidou.mybatisplus.extension.service.IService;
-import com.wzz.smscode.dto.EntityDTO.ProjectDTO;
+import com.wzz.smscode.dto.project.SelectProjectDTO;
 import com.wzz.smscode.dto.project.ProjectPriceDetailsDTO;
 import com.wzz.smscode.dto.project.ProjectPriceSummaryDTO;
 import com.wzz.smscode.entity.Project;
-import com.wzz.smscode.entity.UserProjectLine;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
@@ -35,6 +34,12 @@ public interface ProjectService extends IService<Project> {
 
     Boolean deleteByID(long id);
 
-    List<UserProjectLine>listUserProjects(Long userId);
+    /**
+     * 查询用户可用项目列表（仅返回有剩余配额的项目）
+     *
+     * @param userId 用户ID
+     * @return 项目列表（包含 projectId / projectName）
+     */
+    List<SelectProjectDTO> listUserProjects(Long userId);
 
 }

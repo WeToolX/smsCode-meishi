@@ -1,7 +1,6 @@
 package com.wzz.smscode.dto;
 
 import lombok.Data;
-import java.math.BigDecimal;
 
 /**
  * 单条线路的统计数据 DTO
@@ -28,18 +27,4 @@ public class LineStatisticsDTO {
      */
     private double successRate;
 
-    /**
-     * 总收入
-     */
-    private BigDecimal totalRevenue;
-
-    /**
-     * 总成本
-     */
-    private BigDecimal totalCost;
-
-    /**
-     * 总盈利
-     */
-    private BigDecimal totalProfit;
 }

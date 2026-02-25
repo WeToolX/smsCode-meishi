@@ -11,7 +11,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.math.BigDecimal;
 import java.util.Objects;
 
 @Slf4j
@@ -63,9 +62,6 @@ public class SystemConfigServiceImpl extends ServiceImpl<SystemConfigMapper, Sys
         if (config.getMin24hCodeRate() != null && (config.getMin24hCodeRate() < 0.0 || config.getMin24hCodeRate() > 1.0)) {
             throw new IllegalArgumentException("24小时最低回码率必须在 0.0 到 1.0 之间");
         }
-        if (config.getBalanceThreshold() != null && config.getBalanceThreshold().signum() < 0) {
-            throw new IllegalArgumentException("余额封控下限值不能为负数");
-        }
 
         // 2. 确保更新的是固定的那条配置记录
         config.setConfigId(CONFIG_ID);
@@ -102,18 +98,6 @@ public class SystemConfigServiceImpl extends ServiceImpl<SystemConfigMapper, Sys
         SystemConfig config = getConfig();
         return (config != null && config.getMin24hCodeRate() != null) ? config.getMin24hCodeRate() : 0.0;
     }
-
-    /**
-     * 获取余额封控下限值。
-     *
-     * @return BigDecimal
-     */
-    @Override
-    public BigDecimal getBalanceThreshold() {
-        SystemConfig config = getConfig();
-        return (config != null && config.getBalanceThreshold() != null) ? config.getBalanceThreshold() : BigDecimal.ZERO;
-    }
-
 
     /**
      * 检查并可能封禁用户。

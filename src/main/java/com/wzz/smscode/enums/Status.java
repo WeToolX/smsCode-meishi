@@ -23,9 +23,9 @@ public enum Status {
      */
     USER_VALIDATION_FAILED(-3, "用户验证失败（用户ID或密码错误）"),
     /**
-     * 余额不足（或受到余额封控限制）。
+     * 项目线路配额不足。
      */
-    INSUFFICIENT_BALANCE(-4, "余额不足（或受到余额封控限制）"),
+    INSUFFICIENT_BALANCE(-4, "项目线路配额不足"),
     /**
      * 其他异常情况。
      */

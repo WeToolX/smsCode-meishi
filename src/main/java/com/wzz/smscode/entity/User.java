@@ -156,13 +156,6 @@ public class User extends BaseEntity {
     private String parentName;
 
     /**
-     * 关联的价格模板ID
-     */
-    @ColumnComment("关联的价格模板ID")
-    @TableField("template_id")
-    private Long templateId;
-
-    /**
      * 项目线路黑名单
      * 存储格式示例: "projectId1-lineId1,projectId2-lineId2"
      * 如果存在于此列表中，则用户无法使用该项目线路
@@ -171,11 +164,5 @@ public class User extends BaseEntity {
     @TableField("project_blacklist")
     @ColumnType("TEXT")
     private String projectBlacklist;
-
-    /**
-     * 关联的价格模板名称（非数据库字段，仅用于展示）
-     */
-    @TableField(exist = false)
-    private String templateName;
 
 }
